@@ -117,6 +117,9 @@ struct timeslice {
 	uint64_t		ts_short_ipproto;
 	uint64_t		ts_nonip;
 
+	unsigned int		ts_pcap_recv;
+	unsigned int		ts_pcap_drop;
+
 	struct task		ts_task;
 };
 
@@ -125,8 +128,10 @@ struct timeslice	*timeslice_alloc(void);
 struct flow_daemon;
 
 struct pkt_source {
+	const char		*ps_name;
 	struct flow_daemon	*ps_d;
 	pcap_t			*ps_ph;
+	struct pcap_stat	 ps_pstat;
 	struct event		 ps_ev;
 
 	TAILQ_ENTRY(pkt_source)	 ps_entry;
@@ -230,6 +235,8 @@ main(int argc, char *argv[])
 			errx(1, "%s", errbuf);
 
 		ps->ps_d = d;
+		ps->ps_name = argv[ch];
+		memset(&ps->ps_pstat, 0, sizeof(ps->ps_pstat));
 
 		TAILQ_INSERT_TAIL(&d->d_pkt_sources, ps, ps_entry);
 	}
@@ -294,9 +301,11 @@ timeslice_post(void *arg)
 	printf("flows %u packets %llu bytes %llu\n", ts->ts_flow_count,
 	    packets, bytes);
 	printf("short ether %llu, short vlan %llu, short ip4 %llu, "
-	    "short ip6 %llu, short proto %llu, nonip %llu\n",
+	    "short ip6 %llu, short proto %llu, nonip %llu "
+	    "pcap_recv %u pcap_drop %u\n",
 	    ts->ts_short_ether, ts->ts_short_vlan, ts->ts_short_ip4, 
-	    ts->ts_short_ip6, ts->ts_short_ipproto, ts->ts_nonip);
+	    ts->ts_short_ip6, ts->ts_short_ipproto, ts->ts_nonip,
+	    ts->ts_pcap_recv, ts->ts_pcap_drop);
 
 	free(ts);
 }
@@ -323,6 +332,7 @@ static void
 flow_tick(int nope, short events, void *arg)
 {
 	struct flow_daemon *d = arg;
+	struct pkt_source *ps;
 	struct timeslice *ts = d->d_ts;
 
 	evtimer_add(&d->d_tick, &d->d_tv);
@@ -330,6 +340,18 @@ flow_tick(int nope, short events, void *arg)
 	d->d_ts = timeslice_alloc();
 	if (d->d_ts == NULL)
 		lerr(1, "timeslice alloc");
+
+	TAILQ_FOREACH(ps, &d->d_pkt_sources, ps_entry) {
+		struct pcap_stat pstat;
+
+		if (pcap_stats(ps->ps_ph, &pstat) != 0)
+			errx(1, "%s %s", ps->ps_name, pcap_geterr(ps->ps_ph));
+
+		ts->ts_pcap_recv += pstat.ps_recv - ps->ps_pstat.ps_recv;
+		ts->ts_pcap_drop += pstat.ps_drop - ps->ps_pstat.ps_drop;
+
+		ps->ps_pstat = pstat;
+	}
 
 	task_add(d->d_taskq, &ts->ts_task);
 }
