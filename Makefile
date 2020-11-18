@@ -1,7 +1,9 @@
 
 PROG=	flow
 SRCS=	flow.c
-SRCS+=	log.c task.c
+#PROG=	dnstest
+#SRCS=	dns_test.c
+SRCS+=	log.c task.c dns.c
 MAN=
 
 LDADD=-lpcap -lpthread -levent

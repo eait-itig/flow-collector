@@ -33,6 +33,7 @@
 
 #include <net/if.h>
 #include <net/if_arp.h>
+#include <netdb.h>
 #include <netinet/in_systm.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
@@ -41,6 +42,7 @@
 #include <netinet/udp.h>
 #include <netinet/if_ether.h>
 #include <arpa/inet.h>
+#include <sys/time.h>
 
 #include <sys/queue.h>
 #include <sys/tree.h>
@@ -50,6 +52,7 @@
 
 #include "log.h"
 #include "task.h"
+#include "dns.h"
 
 #ifndef nitems
 #define nitems(_a)	(sizeof((_a)) / sizeof((_a)[0]))
@@ -86,7 +89,16 @@ struct flow_key {
 	}			k_proto;
 #define k_sport				k_proto._k_ports._k_sport
 #define k_dport				k_proto._k_ports._k_dport
-
+	union {
+		struct {
+			uint8_t			_k_syn;
+			uint8_t			_k_fin;
+			uint8_t			_k_rst;
+		} _k_tcpflags;
+	} k_protoinf;
+#define	k_syn				k_protoinf._k_tcpflags._k_syn
+#define	k_fin				k_protoinf._k_tcpflags._k_fin
+#define	k_rst				k_protoinf._k_tcpflags._k_rst
 };
 
 struct flow {
@@ -95,12 +107,41 @@ struct flow {
 	uint64_t		f_packets;
 	uint64_t		f_bytes;
 
+	uint64_t		f_syns;
+	uint64_t		f_fins;
+	uint64_t		f_rsts;
+
 	RBT_ENTRY(flow)		f_entry_tree;
 	TAILQ_ENTRY(flow)	f_entry_list;
 };
 
 RBT_HEAD(flow_tree, flow);
 TAILQ_HEAD(flow_list, flow);
+
+struct lookup {
+	uint8_t			l_ipv;
+	union flow_addr		l_saddr;
+	union flow_addr		l_daddr;
+	uint16_t		l_sport;
+	uint16_t		l_dport;
+
+	uint16_t		l_qid;
+	char *			l_name;
+
+	TAILQ_ENTRY(lookup)	l_entry;
+};
+
+struct rdns {
+	char *			r_name;
+	uint32_t		r_ttl;
+	uint8_t			r_ipv;
+	union flow_addr		r_addr;
+
+	TAILQ_ENTRY(rdns)	r_entry;
+};
+
+TAILQ_HEAD(lookup_list, lookup);
+TAILQ_HEAD(rdns_list, rdns);
 
 static inline int
 flow_cmp(const struct flow *a, const struct flow *b)
@@ -114,6 +155,12 @@ struct timeslice {
 	unsigned int		ts_flow_count;
 	struct flow_tree	ts_flow_tree;
 	struct flow_list	ts_flow_list;
+
+	struct lookup_list	ts_lookup_list;
+	struct rdns_list	ts_rdns_list;
+
+	struct timeval		ts_begin;
+	struct timeval		ts_end;
 
 	uint64_t		ts_short_ether;
 	uint64_t		ts_short_vlan;
@@ -170,6 +217,13 @@ usage(void)
 	exit(1);
 }
 
+static const char *clickhouse_host = "localhost";
+static const char *clickhouse_user = "default";
+static const char *clickhouse_key = NULL;
+static uint16_t clickhouse_port = 8123;
+
+static int debug = 0;
+
 int
 main(int argc, char *argv[])
 {
@@ -186,7 +240,6 @@ main(int argc, char *argv[])
 	struct passwd *pw;
 	int ch;
 	int devnull = -1;
-	int debug = 0;
 	int maxbufsize;
 
 	if (geteuid())
@@ -196,7 +249,7 @@ main(int argc, char *argv[])
 	if (maxbufsize == -1)
 		err(1, "sysctl net.bpf.maxbufsize");
 
-	while ((ch = getopt(argc, argv, "du:w:")) != -1) {
+	while ((ch = getopt(argc, argv, "du:w:h:p:U:k:")) != -1) {
 		switch (ch) {
 		case 'd':
 			debug = 1;
@@ -208,6 +261,17 @@ main(int argc, char *argv[])
 			d->d_tv.tv_sec = strtonum(optarg, 1, 900, &errstr);
 			if (errstr != NULL)
 				errx(1, "%s: %s", optarg, errstr);
+		case 'h':
+			clickhouse_host = optarg;
+			break;
+		case 'p':
+			clickhouse_port = atoi(optarg);
+			break;
+		case 'U':
+			clickhouse_user = optarg;
+			break;
+		case 'k':
+			clickhouse_key = optarg;
 			break;
 		default:
 			usage();
@@ -326,27 +390,267 @@ bpf_maxbufsize(void)
 }
 
 static void
+check_resize_buf(FILE **fp, char **reqbufp, size_t *reqlenp)
+{
+	const size_t off = 2 * ftell(*fp);
+	if (off >= *reqlenp) {
+		fclose(*fp);
+		*fp = NULL;
+
+		*reqlenp *= 2;
+		*reqbufp = realloc(*reqbufp, *reqlenp);
+
+		*fp = fmemopen(*reqbufp, *reqlenp, "a");
+	}
+}
+
+static void
+do_clickhouse_sql(const char *sqlbuf, size_t rows, size_t len, const char *what)
+{
+	static char *reqbuf;
+	static size_t reqlen;
+	FILE *rs, *ss;
+	int sock;
+	struct sockaddr_in serv;
+	struct hostent *servh;
+	char head[256];
+
+	if (reqlen == 0) {
+		reqlen = 1024;
+		reqbuf = malloc(reqlen);
+		if (reqbuf == NULL)
+			lerr(1, "malloc");
+	}
+	rs = fmemopen(reqbuf, reqlen, "w");
+	fprintf(rs, "POST / HTTP/1.0\r\n");
+	fprintf(rs, "Host: %s:%u\r\n", clickhouse_host, clickhouse_port);
+	fprintf(rs, "X-ClickHouse-User: %s\r\n", clickhouse_user);
+	if (clickhouse_key != NULL)
+		fprintf(rs, "X-ClickHouse-Key: %s\r\n", clickhouse_key);
+	fprintf(rs, "Content-Length: %zu\r\n", len - 1);
+	fprintf(rs, "Content-Type: text/sql\r\n");
+	fprintf(rs, "\r\n");
+	fclose(rs);
+
+	sock = socket(AF_INET, SOCK_STREAM, 0);
+	if (sock < 0) {
+		lwarn("socket()");
+		return;
+	}
+	servh = gethostbyname(clickhouse_host);
+	if (servh == NULL) {
+		lwarnx("gethostbyname(): %d", h_errno);
+		return;
+	}
+	bzero(&serv, sizeof (serv));
+	serv.sin_family = AF_INET;
+	bcopy(servh->h_addr, &serv.sin_addr.s_addr, servh->h_length);
+	serv.sin_port = htons(clickhouse_port);
+
+	if (connect(sock, (struct sockaddr *)&serv, sizeof (serv)) < 0) {
+		lwarn("connect()");
+		return;
+	}
+
+	ss = fdopen(sock, "w+");
+	fprintf(ss, "%s%s", reqbuf, sqlbuf);
+	fflush(ss);
+
+	fgets(head, sizeof (head), ss);
+	head[strlen(head) - 1] = '\0';
+	head[strlen(head) - 1] = '\0';
+	if (strcmp(head, "HTTP/1.0 200 OK") != 0)
+		lwarnx("clickhouse: error: returned %s", head);
+
+	if (debug) {
+		linfo("clickhouse: POST of %zu %s rows (%zu bytes): %s",
+		    rows, what, len, head);
+	}
+
+	fclose(ss);
+}
+
+static void
 timeslice_post(void *arg)
 {
 	struct timeslice *ts = arg;
 	struct flow *f, *nf;
-	uint64_t packets = 0;
-	uint64_t bytes = 0;
+	struct lookup *l, *nl;
+	struct rdns *r, *nr;
+	size_t len, rows = 0;
 
-	TAILQ_FOREACH_SAFE(f, &ts->ts_flow_list, f_entry_list, nf) {
-		packets += f->f_packets;
-		bytes += f->f_bytes;
-		free(f);
+	char stbuf[128], etbuf[128];
+	struct tm tm;
+	time_t time;
+
+	static char *sqlbuf;
+	static size_t sqllen = 0;
+
+	const struct flow_key *k;
+	uint i;
+	const char *join;
+	FILE *s;
+
+	if (sqllen == 0) {
+		sqllen = 256*1024;
+		sqlbuf = malloc(sqllen);
+		if (sqlbuf == NULL)
+			lerr(1, "malloc");
 	}
 
-	printf("flows %u packets %llu bytes %llu\n", ts->ts_flow_count,
-	    packets, bytes);
-	printf("short ether %llu, short vlan %llu, short ip4 %llu, "
-	    "short ip6 %llu, short proto %llu, nonip %llu "
-	    "pcap_recv %u pcap_drop %u pcap_ifdrop %u\n",
-	    ts->ts_short_ether, ts->ts_short_vlan, ts->ts_short_ip4, 
-	    ts->ts_short_ip6, ts->ts_short_ipproto, ts->ts_nonip,
-	    ts->ts_pcap_recv, ts->ts_pcap_drop, ts->ts_pcap_ifdrop);
+	time = ts->ts_begin.tv_sec;
+	gmtime_r(&time, &tm);
+	stbuf[0] = '\0';
+	strftime(stbuf, sizeof (stbuf), "%Y-%m-%d %H:%M:%S", &tm);
+	snprintf(stbuf, sizeof (stbuf), "%s.%03lu", stbuf,
+	    (ts->ts_begin.tv_usec / 1000) % 1000);
+
+	time = ts->ts_end.tv_sec;
+	gmtime_r(&time, &tm);
+	etbuf[0] = '\0';
+	strftime(etbuf, sizeof (etbuf), "%Y-%m-%d %H:%M:%S", &tm);
+	snprintf(etbuf, sizeof (etbuf), "%s.%03lu", etbuf,
+	    (ts->ts_end.tv_usec / 1000) % 1000);
+
+
+	rows = 0;
+	join = "";
+	s = fmemopen(sqlbuf, sqllen, "w");
+	if (s == NULL)
+		lerr(1, "fmemopen");
+	fprintf(s,
+	    "INSERT INTO\n"
+	    "  flows (begin_at, end_at, vlan, ipv, ipproto, saddr, daddr,\n"
+	    "         sport, dport, gre_key, packets, bytes, syns, fins, rsts)\n"
+	    "FORMAT Values\n");
+	TAILQ_FOREACH_SAFE(f, &ts->ts_flow_list, f_entry_list, nf) {
+		k = &f->f_key;
+		fprintf(s, "%s('%s','%s',", join, stbuf, etbuf);
+		fprintf(s, "%u,%u,%u,", k->k_vlan, k->k_ipv, k->k_ipproto);
+		if (k->k_ipv == 4) {
+			fprintf(s, "IPv4ToIPv6(toUInt32(%u)),"
+			    "IPv4ToIPv6(toUInt32(%u)),",
+			    htonl(k->k_saddr.addr4.s_addr),
+			    htonl(k->k_daddr.addr4.s_addr));
+		} else if (k->k_ipv == 6) {
+			fprintf(s, "unhex('");
+			for (i = 0; i < sizeof (k->k_saddr.addr6.s6_addr); ++i)
+				fprintf(s, "%02x", k->k_saddr.addr6.s6_addr[i]);
+			fprintf(s, "'),unhex('");
+			for (i = 0; i < sizeof (k->k_daddr.addr6.s6_addr); ++i)
+				fprintf(s, "%02x", k->k_daddr.addr6.s6_addr[i]);
+			fprintf(s, "'),");
+		} else {
+			fprintf(s, "unhex('00000000000000000000000000000000'),"
+			    "unhex('00000000000000000000000000000000'),");
+		}
+		fprintf(s, "%u,%u,0,%llu,%llu,%llu,%llu,%llu)", htons(k->k_sport),
+		    htons(k->k_dport), f->f_packets, f->f_bytes, f->f_syns,
+		    f->f_fins, f->f_rsts);
+		free(f);
+		join = ",\n";
+
+		check_resize_buf(&s, &sqlbuf, &sqllen);
+		++rows;
+	}
+	fprintf(s, ";\n");
+	len = ftell(s);
+	fclose(s);
+
+	do_clickhouse_sql(sqlbuf, rows, len, "flow");
+
+
+	rows = 0;
+	join = "";
+	s = fmemopen(sqlbuf, sqllen, "w");
+	if (s == NULL)
+		lerr(1, "fmemopen");
+	fprintf(s,
+	    "INSERT INTO\n"
+	    "  dns_lookups (begin_at, end_at, saddr, daddr, sport, dport,\n"
+	    "               qid, name)\n"
+	    "FORMAT Values\n");
+	TAILQ_FOREACH_SAFE(l, &ts->ts_lookup_list, l_entry, nl) {
+		fprintf(s, "%s('%s','%s',", join, stbuf, etbuf);
+		if (l->l_ipv == 4) {
+			fprintf(s, "IPv4ToIPv6(toUInt32(%u)),"
+			    "IPv4ToIPv6(toUInt32(%u)),",
+			    htonl(l->l_saddr.addr4.s_addr),
+			    htonl(l->l_daddr.addr4.s_addr));
+		} else if (l->l_ipv == 6) {
+			fprintf(s, "unhex('");
+			for (i = 0; i < sizeof (l->l_saddr.addr6.s6_addr); ++i)
+				fprintf(s, "%02x", l->l_saddr.addr6.s6_addr[i]);
+			fprintf(s, "'),unhex('");
+			for (i = 0; i < sizeof (l->l_daddr.addr6.s6_addr); ++i)
+				fprintf(s, "%02x", l->l_daddr.addr6.s6_addr[i]);
+			fprintf(s, "'),");
+		} else {
+			fprintf(s, "unhex('00000000000000000000000000000000'),"
+			    "unhex('00000000000000000000000000000000'),");
+		}
+		fprintf(s, "%u,%u,%u,'%s')",
+		    htons(l->l_sport), htons(l->l_dport), l->l_qid, l->l_name);
+
+		free(l->l_name);
+		free(l);
+		join = ",\n";
+
+		check_resize_buf(&s, &sqlbuf, &sqllen);
+		++rows;
+	}
+	fprintf(s, ";\n");
+	len = ftell(s);
+	fclose(s);
+
+	do_clickhouse_sql(sqlbuf, rows, len, "lookup");
+
+
+
+	rows = 0;
+	join = "";
+	s = fmemopen(sqlbuf, sqllen, "w");
+	if (s == NULL)
+		lerr(1, "fmemopen");
+	fprintf(s,
+	    "INSERT INTO\n"
+	    "  rdns (begin_at, end_at, addr, name)\n"
+	    "FORMAT Values\n");
+	TAILQ_FOREACH_SAFE(r, &ts->ts_rdns_list, r_entry, nr) {
+		time = ts->ts_end.tv_sec + r->r_ttl;
+		gmtime_r(&time, &tm);
+		etbuf[0] = '\0';
+		strftime(etbuf, sizeof (etbuf), "%Y-%m-%d %H:%M:%S", &tm);
+		snprintf(etbuf, sizeof (etbuf), "%s.%03lu", etbuf,
+		    (ts->ts_end.tv_usec / 1000) % 1000);
+
+		fprintf(s, "%s('%s','%s',", join, stbuf, etbuf);
+		if (r->r_ipv == 4) {
+			fprintf(s, "IPv4ToIPv6(toUInt32(%u)),",
+			    htonl(r->r_addr.addr4.s_addr));
+		} else if (r->r_ipv == 6) {
+			fprintf(s, "unhex('");
+			for (i = 0; i < sizeof (r->r_addr.addr6.s6_addr); ++i)
+				fprintf(s, "%02x", r->r_addr.addr6.s6_addr[i]);
+			fprintf(s, "'),");
+		} else {
+			fprintf(s,
+			    "unhex('00000000000000000000000000000000'),");
+		}
+		fprintf(s, "'%s')", r->r_name);
+
+		free(r->r_name);
+		free(r);
+		join = ",\n";
+
+		check_resize_buf(&s, &sqlbuf, &sqllen);
+		++rows;
+	}
+	fprintf(s, ";\n");
+	len = ftell(s);
+	fclose(s);
+
+	do_clickhouse_sql(sqlbuf, rows, len, "rdns");
 
 	free(ts);
 }
@@ -360,9 +664,12 @@ timeslice_alloc(void)
 	if (ts == NULL)
 		return (NULL);
 
+	gettimeofday(&ts->ts_begin, NULL);
 	ts->ts_flow_count = 0;
 	RBT_INIT(flow_tree, &ts->ts_flow_tree);
 	TAILQ_INIT(&ts->ts_flow_list);
+	TAILQ_INIT(&ts->ts_lookup_list);
+	TAILQ_INIT(&ts->ts_rdns_list);
 
 	task_set(&ts->ts_task, timeslice_post, ts);
 
@@ -397,7 +704,98 @@ flow_tick(int nope, short events, void *arg)
 		ps->ps_pstat = pstat;
 	}
 
+	gettimeofday(&ts->ts_end, NULL);
 	task_add(d->d_taskq, &ts->ts_task);
+}
+
+static void
+pkt_count_dns(struct timeslice *ts, struct flow_key *k,
+    const u_char *buf, u_int buflen)
+{
+	struct dns_buf *db = NULL;
+	const struct dns_header *h;
+	const struct dns_question *dq;
+	const struct dns_record *dr;
+	struct lookup *l;
+	struct rdns *r;
+	enum dns_parser_rc rc = DNS_R_OK;
+	u_int i;
+
+	db = dns_buf_from(buf, buflen);
+	if (db == NULL)
+		goto nodns;
+	if ((rc = dns_read_header(db, &h)))
+		goto nodns;
+	if (h->dh_opcode != DNS_QUERY)
+		goto nodns;
+	if ((h->dh_flags & DNS_QR) && h->dh_rcode != DNS_NOERROR)
+		goto nodns;
+	if (h->dh_questions > 8 || h->dh_answers > 16)
+		goto nodns;
+	for (i = 0; i < h->dh_questions; ++i) {
+		if ((rc = dns_read_question(db, &dq)))
+			goto nodns;
+
+		l = calloc(1, sizeof (struct lookup));
+		if (l == NULL) {
+			rc = DNS_R_NOMEM;
+			goto nodns;
+		}
+		l->l_ipv = k->k_ipv;
+		l->l_saddr = k->k_saddr;
+		l->l_daddr = k->k_daddr;
+		l->l_sport = k->k_sport;
+		l->l_dport = k->k_dport;
+		l->l_qid = h->dh_id;
+		l->l_name = strdup(dq->dq_name);
+		TAILQ_INSERT_TAIL(&ts->ts_lookup_list, l, l_entry);
+	}
+	for (i = 0; i < h->dh_answers; ++i) {
+		if ((rc = dns_read_record(db, &dr)))
+			goto nodns;
+
+		if (dr->dr_type == DNS_T_A) {
+			r = calloc(1, sizeof (struct rdns));
+			if (r == NULL) {
+				rc = DNS_R_NOMEM;
+				goto nodns;
+			}
+			r->r_ipv = 4;
+			r->r_ttl = dr->dr_ttl;
+			r->r_name = strdup(dr->dr_name);
+			r->r_addr.addr4 = dr->dr_data._dr_a_data;
+			TAILQ_INSERT_TAIL(&ts->ts_rdns_list, r, r_entry);
+
+		} else if (dr->dr_type == DNS_T_AAAA) {
+			r = calloc(1, sizeof (struct rdns));
+			if (r == NULL) {
+				rc = DNS_R_NOMEM;
+				goto nodns;
+			}
+			r->r_ipv = 6;
+			r->r_ttl = dr->dr_ttl;
+			r->r_name = strdup(dr->dr_name);
+			r->r_addr.addr6 = dr->dr_data._dr_aaaa_data;
+			TAILQ_INSERT_TAIL(&ts->ts_rdns_list, r, r_entry);
+		}
+	}
+
+nodns:
+	switch (rc) {
+	case DNS_R_OK:
+	case DNS_R_SHORT:
+		break;
+	case DNS_R_PTRLIMIT:
+		//linfo("dns: hit ptr chase limit");
+		break;
+	case DNS_R_ERROR:
+		//linfo("dns: parse error");
+		break;
+	case DNS_R_NOMEM:
+		//linfo("dns: out of memory");
+		break;
+	}
+	dns_buf_free(db);
 }
 
 static int
@@ -415,6 +813,21 @@ pkt_count_tcp(struct timeslice *ts, struct flow_key *k,
 
 	k->k_sport = th->th_sport;
 	k->k_dport = th->th_dport;
+	k->k_syn = (th->th_flags & (TH_SYN | TH_ACK)) == TH_SYN;
+	k->k_fin = (th->th_flags & (TH_FIN | TH_ACK)) == TH_FIN;
+	k->k_rst = (th->th_flags & (TH_RST | TH_ACK)) == TH_RST;
+
+	if ((htons(th->th_dport) == 53 || htons(th->th_sport) == 53) &&
+	    buflen > th->th_off * 4) {
+		buf += th->th_off * 4;
+		buflen -= th->th_off * 4;
+		/* TCP DNS queries have a 16-bit length prefix. */
+		if (buflen > 2) {
+			buflen -= 2;
+			buf += 2;
+			pkt_count_dns(ts, k, buf, buflen);
+		}
+	}
 
 	return (0);
 }
@@ -435,6 +848,12 @@ pkt_count_udp(struct timeslice *ts, struct flow_key *k,
 	k->k_sport = uh->uh_sport;
 	k->k_dport = uh->uh_dport;
 
+	if ((htons(uh->uh_dport) == 53 || htons(uh->uh_sport) == 53) &&
+	    buflen > sizeof (struct udphdr)) {
+		buf += sizeof (struct udphdr);
+		buflen -= sizeof (struct udphdr);
+		pkt_count_dns(ts, k, buf, buflen);
+	}
 	return (0);
 }
 
@@ -480,9 +899,9 @@ pkt_count_ip4(struct timeslice *ts, struct flow_key *k,
 	buflen -= hlen;
 
 	k->k_ipv = 4;
+	k->k_ipproto = iph->ip_p;
 	k->k_saddr4 = iph->ip_src;
 	k->k_daddr4 = iph->ip_dst;
-	k->k_ipproto = iph->ip_p;
 
 	return (pkt_count_ipproto(ts, k, buf, buflen));
 }
@@ -506,9 +925,9 @@ pkt_count_ip6(struct timeslice *ts, struct flow_key *k,
 	buflen -= sizeof(*ip6);
 
 	k->k_ipv = 6;
+	k->k_ipproto = ip6->ip6_nxt;
 	k->k_saddr6 = ip6->ip6_src;
 	k->k_daddr6 = ip6->ip6_dst;
-	k->k_ipproto = ip6->ip6_nxt;
 
 	return (pkt_count_ipproto(ts, k, buf, buflen));
 }
@@ -575,6 +994,10 @@ pkt_count(u_char *arg, const struct pcap_pkthdr *hdr, const u_char *buf)
 		return;
 	}
 
+	f->f_syns = f->f_key.k_syn;
+	f->f_fins = f->f_key.k_fin;
+	f->f_rsts = f->f_key.k_rst;
+
 	of = RBT_INSERT(flow_tree, &ts->ts_flow_tree, f);
 	if (of == NULL) {
 		d->d_flow = malloc(sizeof(*d->d_flow));
@@ -586,6 +1009,9 @@ pkt_count(u_char *arg, const struct pcap_pkthdr *hdr, const u_char *buf)
 	} else {
 		of->f_packets++;
 		of->f_bytes += f->f_bytes;
+		of->f_syns += f->f_syns;
+		of->f_fins += f->f_fins;
+		of->f_rsts += f->f_rsts;
 	}
 }
 
