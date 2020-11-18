@@ -119,6 +119,7 @@ struct timeslice {
 
 	unsigned int		ts_pcap_recv;
 	unsigned int		ts_pcap_drop;
+	unsigned int		ts_pcap_ifdrop;
 
 	struct task		ts_task;
 };
@@ -302,10 +303,10 @@ timeslice_post(void *arg)
 	    packets, bytes);
 	printf("short ether %llu, short vlan %llu, short ip4 %llu, "
 	    "short ip6 %llu, short proto %llu, nonip %llu "
-	    "pcap_recv %u pcap_drop %u\n",
+	    "pcap_recv %u pcap_drop %u pcap_ifdrop %u\n",
 	    ts->ts_short_ether, ts->ts_short_vlan, ts->ts_short_ip4, 
 	    ts->ts_short_ip6, ts->ts_short_ipproto, ts->ts_nonip,
-	    ts->ts_pcap_recv, ts->ts_pcap_drop);
+	    ts->ts_pcap_recv, ts->ts_pcap_drop, ts->ts_pcap_ifdrop);
 
 	free(ts);
 }
@@ -344,11 +345,14 @@ flow_tick(int nope, short events, void *arg)
 	TAILQ_FOREACH(ps, &d->d_pkt_sources, ps_entry) {
 		struct pcap_stat pstat;
 
+		memset(&pstat, 0, sizeof(pstat)); /* for ifdrop */
+
 		if (pcap_stats(ps->ps_ph, &pstat) != 0)
 			errx(1, "%s %s", ps->ps_name, pcap_geterr(ps->ps_ph));
 
 		ts->ts_pcap_recv += pstat.ps_recv - ps->ps_pstat.ps_recv;
 		ts->ts_pcap_drop += pstat.ps_drop - ps->ps_pstat.ps_drop;
+		ts->ts_pcap_ifdrop += pstat.ps_ifdrop - ps->ps_pstat.ps_ifdrop;
 
 		ps->ps_pstat = pstat;
 	}
