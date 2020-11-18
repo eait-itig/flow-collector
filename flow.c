@@ -18,6 +18,7 @@
 
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/sysctl.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -49,6 +50,10 @@
 
 #include "log.h"
 #include "task.h"
+
+#ifndef nitems
+#define nitems(_a)	(sizeof((_a)) / sizeof((_a)[0]))
+#endif
 
 int		rdaemon(int);
 
@@ -151,6 +156,7 @@ struct flow_daemon {
 	struct timeslice	*d_ts;
 };
 
+static int	bpf_maxbufsize(void);
 static void	flow_tick(int, short, void *);
 void		pkt_capture(int, short, void *);
 
@@ -181,9 +187,14 @@ main(int argc, char *argv[])
 	int ch;
 	int devnull = -1;
 	int debug = 0;
+	int maxbufsize;
 
 	if (geteuid())
 		lerrx(1, "neet root privileges");
+
+	maxbufsize = bpf_maxbufsize();
+	if (maxbufsize == -1)
+		err(1, "sysctl net.bpf.maxbufsize");
 
 	while ((ch = getopt(argc, argv, "du:w:")) != -1) {
 		switch (ch) {
@@ -228,8 +239,24 @@ main(int argc, char *argv[])
 		if (ps == NULL)
 			err(1, NULL);
 
-		ps->ps_ph = pcap_open_live(argv[ch], 256, 1, 2000, errbuf);
+		ps->ps_ph = pcap_create(argv[ch], errbuf);
 		if (ps->ps_ph == NULL)
+			errx(1, "%s", errbuf);
+
+		/* XXX TOCTOU */
+		if (pcap_set_buffer_size(ps->ps_ph, maxbufsize) != 0)
+			errx(1, "%s: %s", argv[ch], pcap_geterr(ps->ps_ph));
+
+		if (pcap_set_promisc(ps->ps_ph, 1) != 0)
+			errx(1, "%s", errbuf);
+
+		if (pcap_set_snaplen(ps->ps_ph, 256) != 0)
+			errx(1, "%s", errbuf);
+
+		if (pcap_set_timeout(ps->ps_ph, 10) != 0)
+			errx(1, "%s", errbuf);
+
+		if (pcap_activate(ps->ps_ph) != 0)
 			errx(1, "%s", errbuf);
 
 		if (pcap_setnonblock(ps->ps_ph, 1, errbuf) != 0)
@@ -283,6 +310,19 @@ main(int argc, char *argv[])
 	event_dispatch();
 
 	return (0);
+}
+
+static int
+bpf_maxbufsize(void)
+{
+	int mib[] = { CTL_NET, PF_BPF, NET_BPF_MAXBUFSIZE };
+	int maxbuf;
+	size_t maxbufsize = sizeof(maxbuf);
+
+	if (sysctl(mib, nitems(mib), &maxbuf, &maxbufsize, NULL, 0) == -1)
+		return (-1);
+
+	return (maxbuf);
 }
 
 static void
