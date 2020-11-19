@@ -244,9 +244,6 @@ main(int argc, char *argv[])
 	int devnull = -1;
 	int maxbufsize;
 
-	if (geteuid())
-		lerrx(1, "neet root privileges");
-
 	maxbufsize = bpf_maxbufsize();
 	if (maxbufsize == -1)
 		err(1, "sysctl net.bpf.maxbufsize");
@@ -285,6 +282,9 @@ main(int argc, char *argv[])
 
 	if (argc == 0)
 		usage();
+
+	if (geteuid())
+		lerrx(1, "need root privileges");
 
 	pw = getpwnam(user);
 	if (pw == NULL)
