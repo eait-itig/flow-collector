@@ -212,7 +212,9 @@ usage(void)
 {
 	extern char *__progname;
 
-	fprintf(stderr, "usage: %s [-d] [-u user] if0 ...\n", __progname);
+	fprintf(stderr, "usage: %s [-d] [-u user] [-h clickhouse_host] "
+	    "[-p clickhouse_port] [-U clickhouse_user] [-k clickhouse_key] "
+	    "if0 ...\n", __progname);
 
 	exit(1);
 }
