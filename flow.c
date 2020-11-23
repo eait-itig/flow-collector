@@ -610,8 +610,8 @@ timeslice_post(void *arg)
 		if (k->k_ipv == 4) {
 			fprintf(s, "IPv4ToIPv6(toUInt32(%u)),"
 			    "IPv4ToIPv6(toUInt32(%u)),",
-			    htonl(k->k_saddr.addr4.s_addr),
-			    htonl(k->k_daddr.addr4.s_addr));
+			    ntohl(k->k_saddr.addr4.s_addr),
+			    ntohl(k->k_daddr.addr4.s_addr));
 		} else if (k->k_ipv == 6) {
 			fprintf(s, "unhex('");
 			for (i = 0; i < sizeof (k->k_saddr.addr6.s6_addr); ++i)
@@ -625,7 +625,7 @@ timeslice_post(void *arg)
 			    "unhex('00000000000000000000000000000000'),");
 		}
 		fprintf(s, "%u,%u,%u,%llu,%llu,%llu,%llu,%llu)",
-		    htons(k->k_sport), htons(k->k_dport), ntohl(k->k_gre_key),
+		    ntohs(k->k_sport), ntohs(k->k_dport), ntohl(k->k_gre_key),
 		    f->f_packets, f->f_bytes, f->f_syns, f->f_fins, f->f_rsts);
 		free(f);
 		join = ",\n";
@@ -655,8 +655,8 @@ timeslice_post(void *arg)
 		if (l->l_ipv == 4) {
 			fprintf(s, "IPv4ToIPv6(toUInt32(%u)),"
 			    "IPv4ToIPv6(toUInt32(%u)),",
-			    htonl(l->l_saddr.addr4.s_addr),
-			    htonl(l->l_daddr.addr4.s_addr));
+			    ntohl(l->l_saddr.addr4.s_addr),
+			    ntohl(l->l_daddr.addr4.s_addr));
 		} else if (l->l_ipv == 6) {
 			fprintf(s, "unhex('");
 			for (i = 0; i < sizeof (l->l_saddr.addr6.s6_addr); ++i)
@@ -670,7 +670,7 @@ timeslice_post(void *arg)
 			    "unhex('00000000000000000000000000000000'),");
 		}
 		fprintf(s, "%u,%u,%u,'%s')",
-		    htons(l->l_sport), htons(l->l_dport), l->l_qid, l->l_name);
+		    ntohs(l->l_sport), ntohs(l->l_dport), l->l_qid, l->l_name);
 
 		free(l->l_name);
 		free(l);
@@ -707,7 +707,7 @@ timeslice_post(void *arg)
 		fprintf(s, "%s('%s','%s',", join, stbuf, etbuf);
 		if (r->r_ipv == 4) {
 			fprintf(s, "IPv4ToIPv6(toUInt32(%u)),",
-			    htonl(r->r_addr.addr4.s_addr));
+			    ntohl(r->r_addr.addr4.s_addr));
 		} else if (r->r_ipv == 6) {
 			fprintf(s, "unhex('");
 			for (i = 0; i < sizeof (r->r_addr.addr6.s6_addr); ++i)
