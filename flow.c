@@ -203,7 +203,7 @@ struct timeslice {
 	struct task		ts_task;
 };
 
-struct timeslice	*timeslice_alloc(void);
+struct timeslice	*timeslice_alloc(const struct timeval *);
 
 struct flow_daemon;
 
@@ -267,6 +267,7 @@ main(int argc, char *argv[])
 	struct flow_daemon *d = &_d;
 	struct pkt_source *ps;
 
+	struct timeval now;
 	struct passwd *pw;
 	int ch;
 	int devnull = -1;
@@ -389,7 +390,9 @@ main(int argc, char *argv[])
 	if (d->d_flow == NULL)
 		err(1, NULL);
 
-	d->d_ts = timeslice_alloc();
+	gettimeofday(&now, NULL);
+
+	d->d_ts = timeslice_alloc(&now);
 	if (d->d_ts == NULL)
 		err(1, NULL);
 
@@ -736,7 +739,7 @@ timeslice_post(void *arg)
 }
 
 struct timeslice *
-timeslice_alloc(void)
+timeslice_alloc(const struct timeval *now)
 {
 	struct timeslice *ts;
 
@@ -744,7 +747,7 @@ timeslice_alloc(void)
 	if (ts == NULL)
 		return (NULL);
 
-	gettimeofday(&ts->ts_begin, NULL);
+	ts->ts_begin = *now;
 	ts->ts_flow_count = 0;
 	RBT_INIT(flow_tree, &ts->ts_flow_tree);
 	TAILQ_INIT(&ts->ts_flow_list);
@@ -762,10 +765,13 @@ flow_tick(int nope, short events, void *arg)
 	struct flow_daemon *d = arg;
 	struct pkt_source *ps;
 	struct timeslice *ts = d->d_ts;
+	struct timeval now;
+
+	gettimeofday(&now, NULL);
 
 	evtimer_add(&d->d_tick, &d->d_tv);
 
-	d->d_ts = timeslice_alloc();
+	d->d_ts = timeslice_alloc(&now);
 	if (d->d_ts == NULL)
 		lerr(1, "timeslice alloc");
 
@@ -784,7 +790,7 @@ flow_tick(int nope, short events, void *arg)
 		ps->ps_pstat = pstat;
 	}
 
-	gettimeofday(&ts->ts_end, NULL);
+	ts->ts_end = now;
 	task_add(d->d_taskq, &ts->ts_task);
 }
 
