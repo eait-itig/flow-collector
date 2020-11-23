@@ -37,7 +37,9 @@
 #include <netinet/in_systm.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
+#include <netinet/ip_icmp.h>
 #include <netinet/ip6.h>
+#include <netinet/icmp6.h>
 #include <netinet/tcp.h>
 #include <netinet/udp.h>
 #include <netinet/if_ether.h>
@@ -82,6 +84,10 @@ struct flow_key {
 			uint16_t	_k_dport;
 		}		_k_ports;
 		struct {
+			uint8_t		_k_type;
+			uint8_t		_k_code;
+		}		_k_icmp;
+		struct {
 			uint16_t	_k_flags;
 			uint16_t	_k_proto;
 			uint32_t	_k_key;
@@ -89,6 +95,10 @@ struct flow_key {
 	}			k_proto;
 #define k_sport				k_proto._k_ports._k_sport
 #define k_dport				k_proto._k_ports._k_dport
+
+#define k_icmp_type			k_proto._k_icmp._k_type
+#define k_icmp_code			k_proto._k_icmp._k_code
+
 	union {
 		struct {
 			uint8_t			_k_syn;
@@ -875,6 +885,25 @@ pkt_count_ipproto(struct timeslice *ts, struct flow_key *k,
 }
 
 static int
+pkt_count_icmp4(struct timeslice *ts, struct flow_key *k,
+    const u_char *buf, u_int buflen)
+{
+	const struct icmp *icmp4h;
+
+	if (buflen < offsetof(struct icmp, icmp_cksum)) {
+		ts->ts_short_ipproto++;
+		return (-1);
+	}
+
+	icmp4h = (const struct icmp *)buf;
+
+	k->k_icmp_type = icmp4h->icmp_type;
+	k->k_icmp_code = icmp4h->icmp_code;
+
+	return (0);
+}
+
+static int
 pkt_count_ip4(struct timeslice *ts, struct flow_key *k,
     const u_char *buf, u_int buflen)
 {
@@ -905,7 +934,29 @@ pkt_count_ip4(struct timeslice *ts, struct flow_key *k,
 	k->k_saddr4 = iph->ip_src;
 	k->k_daddr4 = iph->ip_dst;
 
+	if (k->k_ipproto == IPPROTO_ICMP)
+		return (pkt_count_icmp4(ts, k, buf, buflen));
+
 	return (pkt_count_ipproto(ts, k, buf, buflen));
+}
+
+static int
+pkt_count_icmp6(struct timeslice *ts, struct flow_key *k,
+    const u_char *buf, u_int buflen)
+{
+	const struct icmp6_hdr *icmp6h;
+
+	if (buflen < offsetof(struct icmp6_hdr, icmp6_cksum)) {
+		ts->ts_short_ipproto++;
+		return (-1);
+	}
+
+	icmp6h = (const struct icmp6_hdr *)buf;
+
+	k->k_icmp_type = icmp6h->icmp6_type;
+	k->k_icmp_code = icmp6h->icmp6_code;
+
+	return (0);
 }
 
 static int
@@ -930,6 +981,9 @@ pkt_count_ip6(struct timeslice *ts, struct flow_key *k,
 	k->k_ipproto = ip6->ip6_nxt;
 	k->k_saddr6 = ip6->ip6_src;
 	k->k_daddr6 = ip6->ip6_dst;
+
+	if (k->k_ipproto == IPPROTO_ICMPV6)
+		return (pkt_count_icmp6(ts, k, buf, buflen));
 
 	return (pkt_count_ipproto(ts, k, buf, buflen));
 }
