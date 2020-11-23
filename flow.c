@@ -252,17 +252,18 @@ usage(void)
 {
 	extern char *__progname;
 
-	fprintf(stderr, "usage: %s [-d] [-u user] [-h clickhouse_host] "
+	fprintf(stderr, "usage: %s [-46d] [-u user] [-h clickhouse_host] "
 	    "[-p clickhouse_port] [-U clickhouse_user] [-k clickhouse_key] "
 	    "if0 ...\n", __progname);
 
 	exit(1);
 }
 
+static int clickhouse_af = PF_UNSPEC;
 static const char *clickhouse_host = "localhost";
+static const char *clickhouse_port = "8123";
 static const char *clickhouse_user = "default";
 static const char *clickhouse_key = NULL;
-static uint16_t clickhouse_port = 8123;
 
 static int debug = 0;
 
@@ -288,8 +289,14 @@ main(int argc, char *argv[])
 	if (maxbufsize == -1)
 		err(1, "sysctl net.bpf.maxbufsize");
 
-	while ((ch = getopt(argc, argv, "du:w:h:p:U:k:")) != -1) {
+	while ((ch = getopt(argc, argv, "46du:w:h:p:U:k:")) != -1) {
 		switch (ch) {
+		case '4':
+			clickhouse_af = PF_INET;
+			break;
+		case '6':
+			clickhouse_af = PF_INET6;
+			break;
 		case 'd':
 			debug = 1;
 			break;
@@ -304,7 +311,7 @@ main(int argc, char *argv[])
 			clickhouse_host = optarg;
 			break;
 		case 'p':
-			clickhouse_port = atoi(optarg);
+			clickhouse_port = optarg;
 			break;
 		case 'U':
 			clickhouse_user = optarg;
@@ -455,6 +462,57 @@ check_resize_buf(FILE **fp, char **reqbufp, size_t *reqlenp)
 	}
 }
 
+static int
+clickhouse_connect(void)
+{
+	struct addrinfo hints, *res, *res0;
+	int error;
+	int serrno;
+	int s;
+	const char *cause = NULL;
+
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = clickhouse_af;
+	hints.ai_socktype = SOCK_STREAM;
+	error = getaddrinfo(clickhouse_host, clickhouse_port, &hints, &res0);
+	if (error) {
+		lwarnx("clickhouse host %s port %s resolve: %s",
+		    clickhouse_host, clickhouse_port, gai_strerror(error));
+		return (-1);
+	}
+
+	s = -1;
+	for (res = res0; res; res = res->ai_next) {
+		s = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+		if (s == -1) {
+			cause = "socket";
+			serrno = errno;
+			continue;
+		}
+
+		if (connect(s, res->ai_addr, res->ai_addrlen) == -1) {
+			cause = "connect";
+			serrno = errno;
+			close(s);
+			s = -1;
+			continue;
+		}
+
+		break;  /* okay we got one */
+	}
+
+	freeaddrinfo(res0);
+
+	if (s == -1) {
+		errno = serrno;
+		lwarnx("clickhouse host %s port %s %s",
+		    clickhouse_host, clickhouse_port, cause);
+		return (-1);
+	}
+
+	return (s);
+}
+
 static void
 do_clickhouse_sql(const char *sqlbuf, size_t rows, size_t len, const char *what)
 {
@@ -462,8 +520,6 @@ do_clickhouse_sql(const char *sqlbuf, size_t rows, size_t len, const char *what)
 	static size_t reqlen;
 	FILE *rs, *ss;
 	int sock;
-	struct sockaddr_in serv;
-	struct hostent *servh;
 	char head[256];
 
 	if (reqlen == 0) {
@@ -474,7 +530,7 @@ do_clickhouse_sql(const char *sqlbuf, size_t rows, size_t len, const char *what)
 	}
 	rs = fmemopen(reqbuf, reqlen, "w");
 	fprintf(rs, "POST / HTTP/1.0\r\n");
-	fprintf(rs, "Host: %s:%u\r\n", clickhouse_host, clickhouse_port);
+	fprintf(rs, "Host: %s:%s\r\n", clickhouse_host, clickhouse_port);
 	fprintf(rs, "X-ClickHouse-User: %s\r\n", clickhouse_user);
 	if (clickhouse_key != NULL)
 		fprintf(rs, "X-ClickHouse-Key: %s\r\n", clickhouse_key);
@@ -483,25 +539,7 @@ do_clickhouse_sql(const char *sqlbuf, size_t rows, size_t len, const char *what)
 	fprintf(rs, "\r\n");
 	fclose(rs);
 
-	sock = socket(AF_INET, SOCK_STREAM, 0);
-	if (sock < 0) {
-		lwarn("socket()");
-		return;
-	}
-	servh = gethostbyname(clickhouse_host);
-	if (servh == NULL) {
-		lwarnx("gethostbyname(): %d", h_errno);
-		return;
-	}
-	bzero(&serv, sizeof (serv));
-	serv.sin_family = AF_INET;
-	bcopy(servh->h_addr, &serv.sin_addr.s_addr, servh->h_length);
-	serv.sin_port = htons(clickhouse_port);
-
-	if (connect(sock, (struct sockaddr *)&serv, sizeof (serv)) < 0) {
-		lwarn("connect()");
-		return;
-	}
+	sock = clickhouse_connect();
 
 	ss = fdopen(sock, "w+");
 	fprintf(ss, "%s%s", reqbuf, sqlbuf);
