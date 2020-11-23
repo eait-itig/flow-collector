@@ -624,9 +624,9 @@ timeslice_post(void *arg)
 			fprintf(s, "unhex('00000000000000000000000000000000'),"
 			    "unhex('00000000000000000000000000000000'),");
 		}
-		fprintf(s, "%u,%u,0,%llu,%llu,%llu,%llu,%llu)", htons(k->k_sport),
-		    htons(k->k_dport), f->f_packets, f->f_bytes, f->f_syns,
-		    f->f_fins, f->f_rsts);
+		fprintf(s, "%u,%u,%u,%llu,%llu,%llu,%llu,%llu)",
+		    htons(k->k_sport), htons(k->k_dport), ntohl(k->k_gre_key),
+		    f->f_packets, f->f_bytes, f->f_syns, f->f_fins, f->f_rsts);
 		free(f);
 		join = ",\n";
 
