@@ -110,10 +110,6 @@ struct flow_key {
 			uint16_t	_k_dport;
 		}		_k_ports;
 		struct {
-			uint8_t		_k_type;
-			uint8_t		_k_code;
-		}		_k_icmp;
-		struct {
 			uint16_t	_k_flags;
 			uint16_t	_k_proto;
 			uint32_t	_k_key;
@@ -122,8 +118,8 @@ struct flow_key {
 #define k_sport				k_proto._k_ports._k_sport
 #define k_dport				k_proto._k_ports._k_dport
 
-#define k_icmp_type			k_proto._k_icmp._k_type
-#define k_icmp_code			k_proto._k_icmp._k_code
+#define k_icmp_type			k_proto._k_ports._k_sport
+#define k_icmp_code			k_proto._k_ports._k_dport
 
 #define k_gre_flags			k_proto._k_gre._k_flags
 #define k_gre_proto			k_proto._k_gre._k_proto
@@ -1007,8 +1003,8 @@ pkt_count_icmp4(struct timeslice *ts, struct flow *f,
 
 	icmp4h = (const struct icmp *)buf;
 
-	f->f_key.k_icmp_type = icmp4h->icmp_type;
-	f->f_key.k_icmp_code = icmp4h->icmp_code;
+	f->f_key.k_icmp_type = htons(icmp4h->icmp_type);
+	f->f_key.k_icmp_code = htons(icmp4h->icmp_code);
 
 	return (0);
 }
@@ -1063,8 +1059,8 @@ pkt_count_icmp6(struct timeslice *ts, struct flow *f,
 
 	icmp6h = (const struct icmp6_hdr *)buf;
 
-	f->f_key.k_icmp_type = icmp6h->icmp6_type;
-	f->f_key.k_icmp_code = icmp6h->icmp6_code;
+	f->f_key.k_icmp_type = htons(icmp6h->icmp6_type);
+	f->f_key.k_icmp_code = htons(icmp6h->icmp6_code);
 
 	return (0);
 }
