@@ -540,6 +540,10 @@ do_clickhouse_sql(const char *sqlbuf, size_t rows, size_t len, const char *what)
 	fclose(rs);
 
 	sock = clickhouse_connect();
+	if (sock == -1) {
+		/* error was already logged */
+		return;
+	}
 
 	ss = fdopen(sock, "w+");
 	fprintf(ss, "%s%s", reqbuf, sqlbuf);
