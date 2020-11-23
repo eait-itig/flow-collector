@@ -901,7 +901,7 @@ pkt_count_tcp(struct timeslice *ts, struct flow *f,
 	f->f_fins = (th->th_flags & (TH_FIN | TH_ACK)) == TH_FIN;
 	f->f_rsts = (th->th_flags & (TH_RST | TH_ACK)) == TH_RST;
 
-	if ((htons(th->th_dport) == 53 || htons(th->th_sport) == 53) &&
+	if ((th->th_dport == htons(53) || th->th_sport == htons(53)) &&
 	    buflen > th->th_off * 4) {
 		buf += th->th_off * 4;
 		buflen -= th->th_off * 4;
@@ -932,7 +932,7 @@ pkt_count_udp(struct timeslice *ts, struct flow *f,
 	f->f_key.k_sport = uh->uh_sport;
 	f->f_key.k_dport = uh->uh_dport;
 
-	if ((htons(uh->uh_dport) == 53 || htons(uh->uh_sport) == 53) &&
+	if ((uh->uh_dport == htons(53) || uh->uh_sport == htons(53)) &&
 	    buflen > sizeof (struct udphdr)) {
 		buf += sizeof (struct udphdr);
 		buflen -= sizeof (struct udphdr);
