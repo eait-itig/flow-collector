@@ -190,6 +190,8 @@ struct timeslice {
 
 	struct timeval		ts_begin;
 	struct timeval		ts_end;
+	uint64_t		ts_packets;
+	uint64_t		ts_bytes;
 
 	uint64_t		ts_short_ether;
 	uint64_t		ts_short_vlan;
@@ -1139,6 +1141,9 @@ pkt_count(u_char *arg, const struct pcap_pkthdr *hdr, const u_char *buf)
 	buf += hlen;
 	buflen -= hlen;
 	pktlen -= hlen;
+
+	ts->ts_packets++;
+	ts->ts_bytes += pktlen;
 
 	f->f_packets = 1;
 	f->f_bytes = pktlen;
