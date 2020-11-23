@@ -60,6 +60,32 @@
 #define nitems(_a)	(sizeof((_a)) / sizeof((_a)[0]))
 #endif
 
+#ifndef ISSET
+#define ISSET(_v, _m)	((_v) & (_m))
+#endif
+
+struct gre_header {
+	uint16_t		gre_flags;
+#define GRE_CP				0x8000	/* Checksum Present */
+#define GRE_KP				0x2000	/* Key Present */
+#define GRE_SP				0x1000	/* Sequence Present */
+
+#define GRE_VERS_MASK			0x0007
+#define GRE_VERS_0			0x0000
+#define GRE_VERS_1			0x0001
+
+	uint16_t		gre_proto;
+} __packed __aligned(4);
+
+struct gre_h_cksum {
+	uint16_t		gre_cksum;
+	uint16_t		gre_reserved1;
+} __packed __aligned(4);
+
+struct gre_h_key {
+	uint32_t		gre_key;
+} __packed __aligned(4);
+
 int		rdaemon(int);
 
 union flow_addr {
@@ -98,6 +124,10 @@ struct flow_key {
 
 #define k_icmp_type			k_proto._k_icmp._k_type
 #define k_icmp_code			k_proto._k_icmp._k_code
+
+#define k_gre_flags			k_proto._k_gre._k_flags
+#define k_gre_proto			k_proto._k_gre._k_proto
+#define k_gre_key			k_proto._k_gre._k_key
 
 	union {
 		struct {
@@ -399,6 +429,15 @@ bpf_maxbufsize(void)
 		return (-1);
 
 	return (maxbuf);
+}
+
+static inline int
+flow_gre_key_valid(const struct flow_key *k)
+{
+	uint16_t v = k->k_gre_flags;
+	/* ignore checksum and seq no */
+	v &= ~htons(GRE_CP|GRE_SP);
+	return (v == htons(GRE_VERS_0|GRE_KP));
 }
 
 static void
@@ -870,6 +909,42 @@ pkt_count_udp(struct timeslice *ts, struct flow_key *k,
 }
 
 static int
+pkt_count_gre(struct timeslice *ts, struct flow_key *k,
+    const u_char *buf, u_int buflen)
+{
+	const struct gre_header *gh;
+	const struct gre_h_key *gkh;
+	u_int hlen;
+
+	if (buflen < sizeof(*gh)) {
+		ts->ts_short_ipproto++;
+		return (-1);
+	}
+
+	gh = (const struct gre_header *)buf;
+
+	k->k_gre_flags = gh->gre_flags;
+	k->k_gre_proto = gh->gre_proto;
+
+	if (!flow_gre_key_valid(k))
+		return (0);
+
+	hlen = sizeof(*gh);
+	if (ISSET(k->k_gre_flags, htons(GRE_CP)))
+		hlen += sizeof(struct gre_h_cksum);
+	gkh = (const struct gre_h_key *)buf;
+	hlen += sizeof(*gkh);
+	if (buflen < hlen) {
+		return ts->ts_short_ipproto++;
+		return (-1);
+	}
+
+	k->k_gre_key = gkh->gre_key;
+
+	return (0);
+}
+
+static int
 pkt_count_ipproto(struct timeslice *ts, struct flow_key *k,
     const u_char *buf, u_int buflen)
 {
@@ -879,6 +954,8 @@ pkt_count_ipproto(struct timeslice *ts, struct flow_key *k,
 	case IPPROTO_UDP:
 	case IPPROTO_UDPLITE:
 		return (pkt_count_udp(ts, k, buf, buflen));
+	case IPPROTO_GRE:
+		return (pkt_count_gre(ts, k, buf, buflen));
 	}
 
 	return (0);
