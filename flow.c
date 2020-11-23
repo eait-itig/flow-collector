@@ -128,17 +128,6 @@ struct flow_key {
 #define k_gre_flags			k_proto._k_gre._k_flags
 #define k_gre_proto			k_proto._k_gre._k_proto
 #define k_gre_key			k_proto._k_gre._k_key
-
-	union {
-		struct {
-			uint8_t			_k_syn;
-			uint8_t			_k_fin;
-			uint8_t			_k_rst;
-		} _k_tcpflags;
-	} k_protoinf;
-#define	k_syn				k_protoinf._k_tcpflags._k_syn
-#define	k_fin				k_protoinf._k_tcpflags._k_fin
-#define	k_rst				k_protoinf._k_tcpflags._k_rst
 };
 
 struct flow {
@@ -439,9 +428,9 @@ bpf_maxbufsize(void)
 }
 
 static inline int
-flow_gre_key_valid(const struct flow_key *k)
+flow_gre_key_valid(const struct flow *f)
 {
-	uint16_t v = k->k_gre_flags;
+	uint16_t v = f->f_key.k_gre_flags;
 	/* ignore checksum and seq no */
 	v &= ~htons(GRE_CP|GRE_SP);
 	return (v == htons(GRE_VERS_0|GRE_KP));
@@ -802,7 +791,7 @@ flow_tick(int nope, short events, void *arg)
 }
 
 static void
-pkt_count_dns(struct timeslice *ts, struct flow_key *k,
+pkt_count_dns(struct timeslice *ts, struct flow *f,
     const u_char *buf, u_int buflen)
 {
 	struct dns_buf *db = NULL;
@@ -834,11 +823,11 @@ pkt_count_dns(struct timeslice *ts, struct flow_key *k,
 			rc = DNS_R_NOMEM;
 			goto nodns;
 		}
-		l->l_ipv = k->k_ipv;
-		l->l_saddr = k->k_saddr;
-		l->l_daddr = k->k_daddr;
-		l->l_sport = k->k_sport;
-		l->l_dport = k->k_dport;
+		l->l_ipv = f->f_key.k_ipv;
+		l->l_saddr = f->f_key.k_saddr;
+		l->l_daddr = f->f_key.k_daddr;
+		l->l_sport = f->f_key.k_sport;
+		l->l_dport = f->f_key.k_dport;
 		l->l_qid = h->dh_id;
 		l->l_name = strdup(dq->dq_name);
 		TAILQ_INSERT_TAIL(&ts->ts_lookup_list, l, l_entry);
@@ -892,7 +881,7 @@ nodns:
 }
 
 static int
-pkt_count_tcp(struct timeslice *ts, struct flow_key *k,
+pkt_count_tcp(struct timeslice *ts, struct flow *f,
     const u_char *buf, u_int buflen)
 {
 	const struct tcphdr *th;
@@ -904,11 +893,11 @@ pkt_count_tcp(struct timeslice *ts, struct flow_key *k,
 
 	th = (const struct tcphdr *)buf;
 
-	k->k_sport = th->th_sport;
-	k->k_dport = th->th_dport;
-	k->k_syn = (th->th_flags & (TH_SYN | TH_ACK)) == TH_SYN;
-	k->k_fin = (th->th_flags & (TH_FIN | TH_ACK)) == TH_FIN;
-	k->k_rst = (th->th_flags & (TH_RST | TH_ACK)) == TH_RST;
+	f->f_key.k_sport = th->th_sport;
+	f->f_key.k_dport = th->th_dport;
+	f->f_syns = (th->th_flags & (TH_SYN | TH_ACK)) == TH_SYN;
+	f->f_fins = (th->th_flags & (TH_FIN | TH_ACK)) == TH_FIN;
+	f->f_rsts = (th->th_flags & (TH_RST | TH_ACK)) == TH_RST;
 
 	if ((htons(th->th_dport) == 53 || htons(th->th_sport) == 53) &&
 	    buflen > th->th_off * 4) {
@@ -918,7 +907,7 @@ pkt_count_tcp(struct timeslice *ts, struct flow_key *k,
 		if (buflen > 2) {
 			buflen -= 2;
 			buf += 2;
-			pkt_count_dns(ts, k, buf, buflen);
+			pkt_count_dns(ts, f, buf, buflen);
 		}
 	}
 
@@ -926,7 +915,7 @@ pkt_count_tcp(struct timeslice *ts, struct flow_key *k,
 }
 
 static int
-pkt_count_udp(struct timeslice *ts, struct flow_key *k,
+pkt_count_udp(struct timeslice *ts, struct flow *f,
     const u_char *buf, u_int buflen)
 {
 	const struct udphdr *uh;
@@ -938,20 +927,20 @@ pkt_count_udp(struct timeslice *ts, struct flow_key *k,
 
 	uh = (const struct udphdr *)buf;
 
-	k->k_sport = uh->uh_sport;
-	k->k_dport = uh->uh_dport;
+	f->f_key.k_sport = uh->uh_sport;
+	f->f_key.k_dport = uh->uh_dport;
 
 	if ((htons(uh->uh_dport) == 53 || htons(uh->uh_sport) == 53) &&
 	    buflen > sizeof (struct udphdr)) {
 		buf += sizeof (struct udphdr);
 		buflen -= sizeof (struct udphdr);
-		pkt_count_dns(ts, k, buf, buflen);
+		pkt_count_dns(ts, f, buf, buflen);
 	}
 	return (0);
 }
 
 static int
-pkt_count_gre(struct timeslice *ts, struct flow_key *k,
+pkt_count_gre(struct timeslice *ts, struct flow *f,
     const u_char *buf, u_int buflen)
 {
 	const struct gre_header *gh;
@@ -965,14 +954,14 @@ pkt_count_gre(struct timeslice *ts, struct flow_key *k,
 
 	gh = (const struct gre_header *)buf;
 
-	k->k_gre_flags = gh->gre_flags;
-	k->k_gre_proto = gh->gre_proto;
+	f->f_key.k_gre_flags = gh->gre_flags;
+	f->f_key.k_gre_proto = gh->gre_proto;
 
-	if (!flow_gre_key_valid(k))
+	if (!flow_gre_key_valid(f))
 		return (0);
 
 	hlen = sizeof(*gh);
-	if (ISSET(k->k_gre_flags, htons(GRE_CP)))
+	if (ISSET(f->f_key.k_gre_flags, htons(GRE_CP)))
 		hlen += sizeof(struct gre_h_cksum);
 	gkh = (const struct gre_h_key *)buf;
 	hlen += sizeof(*gkh);
@@ -981,30 +970,30 @@ pkt_count_gre(struct timeslice *ts, struct flow_key *k,
 		return (-1);
 	}
 
-	k->k_gre_key = gkh->gre_key;
+	f->f_key.k_gre_key = gkh->gre_key;
 
 	return (0);
 }
 
 static int
-pkt_count_ipproto(struct timeslice *ts, struct flow_key *k,
+pkt_count_ipproto(struct timeslice *ts, struct flow *f,
     const u_char *buf, u_int buflen)
 {
-	switch (k->k_ipproto) {
+	switch (f->f_key.k_ipproto) {
 	case IPPROTO_TCP:
-		return (pkt_count_tcp(ts, k, buf, buflen));
+		return (pkt_count_tcp(ts, f, buf, buflen));
 	case IPPROTO_UDP:
 	case IPPROTO_UDPLITE:
-		return (pkt_count_udp(ts, k, buf, buflen));
+		return (pkt_count_udp(ts, f, buf, buflen));
 	case IPPROTO_GRE:
-		return (pkt_count_gre(ts, k, buf, buflen));
+		return (pkt_count_gre(ts, f, buf, buflen));
 	}
 
 	return (0);
 }
 
 static int
-pkt_count_icmp4(struct timeslice *ts, struct flow_key *k,
+pkt_count_icmp4(struct timeslice *ts, struct flow *f,
     const u_char *buf, u_int buflen)
 {
 	const struct icmp *icmp4h;
@@ -1016,14 +1005,14 @@ pkt_count_icmp4(struct timeslice *ts, struct flow_key *k,
 
 	icmp4h = (const struct icmp *)buf;
 
-	k->k_icmp_type = icmp4h->icmp_type;
-	k->k_icmp_code = icmp4h->icmp_code;
+	f->f_key.k_icmp_type = icmp4h->icmp_type;
+	f->f_key.k_icmp_code = icmp4h->icmp_code;
 
 	return (0);
 }
 
 static int
-pkt_count_ip4(struct timeslice *ts, struct flow_key *k,
+pkt_count_ip4(struct timeslice *ts, struct flow *f,
     const u_char *buf, u_int buflen)
 {
 	const struct ip *iph;
@@ -1048,19 +1037,19 @@ pkt_count_ip4(struct timeslice *ts, struct flow_key *k,
 	buf += hlen;
 	buflen -= hlen;
 
-	k->k_ipv = 4;
-	k->k_ipproto = iph->ip_p;
-	k->k_saddr4 = iph->ip_src;
-	k->k_daddr4 = iph->ip_dst;
+	f->f_key.k_ipv = 4;
+	f->f_key.k_ipproto = iph->ip_p;
+	f->f_key.k_saddr4 = iph->ip_src;
+	f->f_key.k_daddr4 = iph->ip_dst;
 
-	if (k->k_ipproto == IPPROTO_ICMP)
-		return (pkt_count_icmp4(ts, k, buf, buflen));
+	if (f->f_key.k_ipproto == IPPROTO_ICMP)
+		return (pkt_count_icmp4(ts, f, buf, buflen));
 
-	return (pkt_count_ipproto(ts, k, buf, buflen));
+	return (pkt_count_ipproto(ts, f, buf, buflen));
 }
 
 static int
-pkt_count_icmp6(struct timeslice *ts, struct flow_key *k,
+pkt_count_icmp6(struct timeslice *ts, struct flow *f,
     const u_char *buf, u_int buflen)
 {
 	const struct icmp6_hdr *icmp6h;
@@ -1072,14 +1061,14 @@ pkt_count_icmp6(struct timeslice *ts, struct flow_key *k,
 
 	icmp6h = (const struct icmp6_hdr *)buf;
 
-	k->k_icmp_type = icmp6h->icmp6_type;
-	k->k_icmp_code = icmp6h->icmp6_code;
+	f->f_key.k_icmp_type = icmp6h->icmp6_type;
+	f->f_key.k_icmp_code = icmp6h->icmp6_code;
 
 	return (0);
 }
 
 static int
-pkt_count_ip6(struct timeslice *ts, struct flow_key *k,
+pkt_count_ip6(struct timeslice *ts, struct flow *f,
     const u_char *buf, u_int buflen)
 {
 	const struct ip6_hdr *ip6;
@@ -1096,15 +1085,15 @@ pkt_count_ip6(struct timeslice *ts, struct flow_key *k,
 	buf += sizeof(*ip6);
 	buflen -= sizeof(*ip6);
 
-	k->k_ipv = 6;
-	k->k_ipproto = ip6->ip6_nxt;
-	k->k_saddr6 = ip6->ip6_src;
-	k->k_daddr6 = ip6->ip6_dst;
+	f->f_key.k_ipv = 6;
+	f->f_key.k_ipproto = ip6->ip6_nxt;
+	f->f_key.k_saddr6 = ip6->ip6_src;
+	f->f_key.k_daddr6 = ip6->ip6_dst;
 
-	if (k->k_ipproto == IPPROTO_ICMPV6)
-		return (pkt_count_icmp6(ts, k, buf, buflen));
+	if (f->f_key.k_ipproto == IPPROTO_ICMPV6)
+		return (pkt_count_icmp6(ts, f, buf, buflen));
 
-	return (pkt_count_ipproto(ts, k, buf, buflen));
+	return (pkt_count_ipproto(ts, f, buf, buflen));
 }
 
 static void
@@ -1156,11 +1145,11 @@ pkt_count(u_char *arg, const struct pcap_pkthdr *hdr, const u_char *buf)
 
 	switch (type) {
 	case htons(ETHERTYPE_IP):
-		if (pkt_count_ip4(ts, &f->f_key, buf, buflen) == -1)
+		if (pkt_count_ip4(ts, f, buf, buflen) == -1)
 			return;
 		break;
 	case htons(ETHERTYPE_IPV6):
-		if (pkt_count_ip6(ts, &f->f_key, buf, buflen) == -1)
+		if (pkt_count_ip6(ts, f, buf, buflen) == -1)
 			return;
 		break;
 
@@ -1168,10 +1157,6 @@ pkt_count(u_char *arg, const struct pcap_pkthdr *hdr, const u_char *buf)
 		ts->ts_nonip++;
 		return;
 	}
-
-	f->f_syns = f->f_key.k_syn;
-	f->f_fins = f->f_key.k_fin;
-	f->f_rsts = f->f_key.k_rst;
 
 	of = RBT_INSERT(flow_tree, &ts->ts_flow_tree, f);
 	if (of == NULL) {
