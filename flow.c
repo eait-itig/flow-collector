@@ -233,6 +233,8 @@ struct flow_daemon {
 static int	bpf_maxbufsize(void);
 static void	flow_tick(int, short, void *);
 void		pkt_capture(int, short, void *);
+static struct addrinfo *
+		clickhouse_resolve(void);
 
 __dead static void
 usage(void)
@@ -251,6 +253,7 @@ static const char *clickhouse_host = "localhost";
 static const char *clickhouse_port = "8123";
 static const char *clickhouse_user = "default";
 static const char *clickhouse_key = NULL;
+static struct addrinfo *clickhouse_res;
 
 static int debug = 0;
 static int pagesize;
@@ -324,6 +327,8 @@ main(int argc, char *argv[])
 
 	if (argc == 0)
 		usage();
+
+	clickhouse_res = clickhouse_resolve();
 
 	if (geteuid())
 		lerrx(1, "need root privileges");
@@ -444,24 +449,31 @@ flow_gre_key_valid(const struct flow *f)
 	return (v == htons(GRE_VERS_0|GRE_KP));
 }
 
-static int
-clickhouse_connect(void)
+static struct addrinfo *
+clickhouse_resolve(void)
 {
-	struct addrinfo hints, *res, *res0;
+	struct addrinfo hints, *res0;
 	int error;
-	int serrno;
-	int s;
-	const char *cause = NULL;
 
 	memset(&hints, 0, sizeof(hints));
 	hints.ai_family = clickhouse_af;
 	hints.ai_socktype = SOCK_STREAM;
 	error = getaddrinfo(clickhouse_host, clickhouse_port, &hints, &res0);
 	if (error) {
-		lwarnx("clickhouse host %s port %s resolve: %s",
+		errx(1, "clickhouse host %s port %s resolve: %s",
 		    clickhouse_host, clickhouse_port, gai_strerror(error));
-		return (-1);
 	}
+
+	return (res0);
+}
+
+static int
+clickhouse_connect(void)
+{
+	struct addrinfo *res0 = clickhouse_res, *res;
+	int serrno;
+	int s;
+	const char *cause = NULL;
 
 	s = -1;
 	for (res = res0; res; res = res->ai_next) {
@@ -482,8 +494,6 @@ clickhouse_connect(void)
 
 		break;  /* okay we got one */
 	}
-
-	freeaddrinfo(res0);
 
 	if (s == -1) {
 		errno = serrno;
