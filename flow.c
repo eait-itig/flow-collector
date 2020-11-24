@@ -253,6 +253,7 @@ static const char *clickhouse_user = "default";
 static const char *clickhouse_key = NULL;
 
 static int debug = 0;
+static int pagesize;
 
 int
 main(int argc, char *argv[])
@@ -276,6 +277,12 @@ main(int argc, char *argv[])
 	maxbufsize = bpf_maxbufsize();
 	if (maxbufsize == -1)
 		err(1, "sysctl net.bpf.maxbufsize");
+
+	pagesize = sysconf(_SC_PAGESIZE);
+	if (pagesize == -1)
+		err(1, "page size");
+	if (pagesize < 1024) /* in case we're run on a crappy vax OS */
+		pagesize = 1024;
 
 	while ((ch = getopt(argc, argv, "46du:w:h:p:U:k:")) != -1) {
 		switch (ch) {
@@ -437,21 +444,6 @@ flow_gre_key_valid(const struct flow *f)
 	return (v == htons(GRE_VERS_0|GRE_KP));
 }
 
-static void
-check_resize_buf(FILE **fp, char **reqbufp, size_t *reqlenp)
-{
-	const size_t off = 2 * ftell(*fp);
-	if (off >= *reqlenp) {
-		fclose(*fp);
-		*fp = NULL;
-
-		*reqlenp *= 2;
-		*reqbufp = realloc(*reqbufp, *reqlenp);
-
-		*fp = fmemopen(*reqbufp, *reqlenp, "a");
-	}
-}
-
 static int
 clickhouse_connect(void)
 {
@@ -503,31 +495,90 @@ clickhouse_connect(void)
 	return (s);
 }
 
-static void
-do_clickhouse_sql(const char *sqlbuf, size_t rows, size_t len, const char *what)
+struct buf {
+	char	*mem;
+	size_t	 len;
+	size_t	 off;
+};
+
+static inline void
+buf_init(struct buf *b)
 {
-	static char *reqbuf;
-	static size_t reqlen;
-	FILE *rs, *ss;
+	b->off = 0;
+}
+
+static void
+buf_resize(struct buf *b)
+{
+	b->len += pagesize;
+	b->mem = realloc(b->mem, b->len);
+	if (b->mem == NULL)
+		lerr(1, "buffer resize");
+}
+
+static void
+buf_reserve(struct buf *b)
+{
+	if ((b->off + pagesize) > b->len)
+		buf_resize(b);
+}
+
+static void
+buf_cat(struct buf *b, const char *str)
+{
+	size_t off, rv;
+
+	buf_reserve(b);
+
+	for (;;) {
+		rv = strlcpy(b->mem + b->off, str, b->len - b->off);
+		off = b->off + rv;
+		if (off < b->len)
+			break;
+
+		buf_resize(b);
+	}
+
+	b->off = off;
+}
+
+static void
+buf_printf(struct buf *b, const char *fmt, ...)
+{
+	va_list ap;
+	size_t off;
+	int rv;
+
+	buf_reserve(b);
+
+	for (;;) {
+		va_start(ap, fmt);
+		rv = vsnprintf(b->mem + b->off, b->len - b->off, fmt, ap);
+		va_end(ap);
+
+		if (rv == -1)
+			lerr(1, "%s", __func__);
+
+		off = b->off + rv;
+		if (off < b->len)
+			break;
+
+		buf_resize(b);
+	}
+
+	b->off = off;
+}
+
+static void
+do_clickhouse_sql(const struct buf *sqlbuf, size_t rows, const char *what)
+{
+	static struct buf reqbuf;
 	int sock;
+	struct iovec iov[2];
+	FILE *ss;
 	char head[256];
 
-	if (reqlen == 0) {
-		reqlen = 1024;
-		reqbuf = malloc(reqlen);
-		if (reqbuf == NULL)
-			lerr(1, "malloc");
-	}
-	rs = fmemopen(reqbuf, reqlen, "w");
-	fprintf(rs, "POST / HTTP/1.0\r\n");
-	fprintf(rs, "Host: %s:%s\r\n", clickhouse_host, clickhouse_port);
-	fprintf(rs, "X-ClickHouse-User: %s\r\n", clickhouse_user);
-	if (clickhouse_key != NULL)
-		fprintf(rs, "X-ClickHouse-Key: %s\r\n", clickhouse_key);
-	fprintf(rs, "Content-Length: %zu\r\n", len - 1);
-	fprintf(rs, "Content-Type: text/sql\r\n");
-	fprintf(rs, "\r\n");
-	fclose(rs);
+	buf_init(&reqbuf);
 
 	sock = clickhouse_connect();
 	if (sock == -1) {
@@ -535,9 +586,26 @@ do_clickhouse_sql(const char *sqlbuf, size_t rows, size_t len, const char *what)
 		return;
 	}
 
-	ss = fdopen(sock, "w+");
-	fprintf(ss, "%s%s", reqbuf, sqlbuf);
-	fflush(ss);
+	buf_printf(&reqbuf, "POST / HTTP/1.0\r\n");
+	buf_printf(&reqbuf, "Host: %s:%s\r\n",
+	    clickhouse_host, clickhouse_port);
+	buf_printf(&reqbuf, "X-ClickHouse-User: %s\r\n", clickhouse_user);
+	if (clickhouse_key != NULL)
+		buf_printf(&reqbuf, "X-ClickHouse-Key: %s\r\n", clickhouse_key);
+	buf_printf(&reqbuf, "Content-Length: %zu\r\n", sqlbuf->off);
+	buf_printf(&reqbuf, "Content-Type: text/sql\r\n");
+	buf_printf(&reqbuf, "\r\n");
+
+	iov[0].iov_base = reqbuf.mem;
+	iov[0].iov_len = reqbuf.off;
+	iov[1].iov_base = sqlbuf->mem;
+	iov[1].iov_len = sqlbuf->off;
+
+	writev(sock, iov, nitems(iov)); /* XXX */
+
+	ss = fdopen(sock, "r");
+	if (ss == NULL)
+		lerr(1, "fdopen");
 
 	fgets(head, sizeof (head), ss);
 	head[strlen(head) - 1] = '\0';
@@ -547,7 +615,7 @@ do_clickhouse_sql(const char *sqlbuf, size_t rows, size_t len, const char *what)
 
 	if (debug) {
 		linfo("clickhouse: POST of %zu %s rows (%zu bytes): %s",
-		    rows, what, len, head);
+		    rows, what, sqlbuf->off, head);
 	}
 
 	fclose(ss);
@@ -560,26 +628,17 @@ timeslice_post(void *arg)
 	struct flow *f, *nf;
 	struct lookup *l, *nl;
 	struct rdns *r, *nr;
-	size_t len, rows = 0;
+	size_t rows = 0;
 
 	char stbuf[128], etbuf[128];
+	char ipbuf[NI_MAXHOST];
 	struct tm tm;
 	time_t time;
 
-	static char *sqlbuf;
-	static size_t sqllen = 0;
+	static struct buf sqlbuf;
 
 	const struct flow_key *k;
-	uint i;
 	const char *join;
-	FILE *s;
-
-	if (sqllen == 0) {
-		sqllen = 256*1024;
-		sqlbuf = malloc(sqllen);
-		if (sqlbuf == NULL)
-			lerr(1, "malloc");
-	}
 
 	time = ts->ts_begin.tv_sec;
 	gmtime_r(&time, &tm);
@@ -595,110 +654,93 @@ timeslice_post(void *arg)
 	snprintf(etbuf, sizeof (etbuf), "%s.%03lu", etbuf,
 	    (ts->ts_end.tv_usec / 1000) % 1000);
 
-
 	rows = 0;
 	join = "";
-	s = fmemopen(sqlbuf, sqllen, "w");
-	if (s == NULL)
-		lerr(1, "fmemopen");
-	fprintf(s,
-	    "INSERT INTO\n"
-	    "  flows (begin_at, end_at, vlan, ipv, ipproto, saddr, daddr,\n"
-	    "         sport, dport, gre_key, packets, bytes, syns, fins, rsts)\n"
-	    "FORMAT Values\n");
+
+	buf_init(&sqlbuf);
+	buf_cat(&sqlbuf, "INSERT INTO flows ("
+	    "begin_at, end_at, vlan, ipv, ipproto, saddr, daddr,"
+	    "sport, dport, gre_key, packets, bytes, syns, fins, rsts"
+	    ")\n" "FORMAT Values\n");
+
 	TAILQ_FOREACH_SAFE(f, &ts->ts_flow_list, f_entry_list, nf) {
 		k = &f->f_key;
-		fprintf(s, "%s('%s','%s',", join, stbuf, etbuf);
-		fprintf(s, "%u,%u,%u,", k->k_vlan, k->k_ipv, k->k_ipproto);
+		buf_printf(&sqlbuf, "%s('%s','%s',", join, stbuf, etbuf);
+		buf_printf(&sqlbuf, "%u,%u,%u,", k->k_vlan, k->k_ipv,
+		    k->k_ipproto);
 		if (k->k_ipv == 4) {
-			fprintf(s, "IPv4ToIPv6(toUInt32(%u)),"
-			    "IPv4ToIPv6(toUInt32(%u)),",
-			    ntohl(k->k_saddr.addr4.s_addr),
-			    ntohl(k->k_daddr.addr4.s_addr));
+			inet_ntop(PF_INET, &k->k_saddr4, ipbuf, sizeof(ipbuf));
+			buf_printf(&sqlbuf, "IPv4ToIPv6(toIPv4('%s')),", ipbuf);
+			inet_ntop(PF_INET, &k->k_daddr4, ipbuf, sizeof(ipbuf));
+			buf_printf(&sqlbuf, "IPv4ToIPv6(toIPv4('%s')),", ipbuf);
 		} else if (k->k_ipv == 6) {
-			fprintf(s, "unhex('");
-			for (i = 0; i < sizeof (k->k_saddr.addr6.s6_addr); ++i)
-				fprintf(s, "%02x", k->k_saddr.addr6.s6_addr[i]);
-			fprintf(s, "'),unhex('");
-			for (i = 0; i < sizeof (k->k_daddr.addr6.s6_addr); ++i)
-				fprintf(s, "%02x", k->k_daddr.addr6.s6_addr[i]);
-			fprintf(s, "'),");
+			inet_ntop(PF_INET6, &k->k_saddr6, ipbuf, sizeof(ipbuf));
+			buf_printf(&sqlbuf, "toIPv6('%s')),", ipbuf);
+			inet_ntop(PF_INET6, &k->k_daddr6, ipbuf, sizeof(ipbuf));
+			buf_printf(&sqlbuf, "toIPv6('%s')),", ipbuf);
 		} else {
-			fprintf(s, "unhex('00000000000000000000000000000000'),"
-			    "unhex('00000000000000000000000000000000'),");
+			buf_printf(&sqlbuf, "toIPv6('::'),toIPv6('::')");
 		}
-		fprintf(s, "%u,%u,%u,%llu,%llu,%llu,%llu,%llu)",
+		buf_printf(&sqlbuf, "%u,%u,%u,%llu,%llu,%llu,%llu,%llu)",
 		    ntohs(k->k_sport), ntohs(k->k_dport), ntohl(k->k_gre_key),
 		    f->f_packets, f->f_bytes, f->f_syns, f->f_fins, f->f_rsts);
 		free(f);
 		join = ",\n";
 
-		check_resize_buf(&s, &sqlbuf, &sqllen);
 		++rows;
 	}
-	fprintf(s, ";\n");
-	len = ftell(s);
-	fclose(s);
+	buf_printf(&sqlbuf, ";\n");
 
-	do_clickhouse_sql(sqlbuf, rows, len, "flow");
-
+	do_clickhouse_sql(&sqlbuf, rows, "flow");
 
 	rows = 0;
 	join = "";
-	s = fmemopen(sqlbuf, sqllen, "w");
-	if (s == NULL)
-		lerr(1, "fmemopen");
-	fprintf(s,
-	    "INSERT INTO\n"
-	    "  dns_lookups (begin_at, end_at, saddr, daddr, sport, dport,\n"
-	    "               qid, name)\n"
-	    "FORMAT Values\n");
+
+	buf_init(&sqlbuf);
+	buf_cat(&sqlbuf, "INSERT INTO dns_lookups ("
+	    "begin_at,end_at,saddr,daddr,sport,dport,qid,name"
+	    ")\n" "FORMAT Values\n");
+
 	TAILQ_FOREACH_SAFE(l, &ts->ts_lookup_list, l_entry, nl) {
-		fprintf(s, "%s('%s','%s',", join, stbuf, etbuf);
+		buf_printf(&sqlbuf, "%s('%s','%s',", join, stbuf, etbuf);
 		if (l->l_ipv == 4) {
-			fprintf(s, "IPv4ToIPv6(toUInt32(%u)),"
-			    "IPv4ToIPv6(toUInt32(%u)),",
-			    ntohl(l->l_saddr.addr4.s_addr),
-			    ntohl(l->l_daddr.addr4.s_addr));
-		} else if (l->l_ipv == 6) {
-			fprintf(s, "unhex('");
-			for (i = 0; i < sizeof (l->l_saddr.addr6.s6_addr); ++i)
-				fprintf(s, "%02x", l->l_saddr.addr6.s6_addr[i]);
-			fprintf(s, "'),unhex('");
-			for (i = 0; i < sizeof (l->l_daddr.addr6.s6_addr); ++i)
-				fprintf(s, "%02x", l->l_daddr.addr6.s6_addr[i]);
-			fprintf(s, "'),");
+			inet_ntop(PF_INET, &l->l_saddr.addr4.s_addr,
+			    ipbuf, sizeof(ipbuf));
+			buf_printf(&sqlbuf, "IPv4ToIPv6(toIPv4('%s')),", ipbuf);
+			inet_ntop(PF_INET, &l->l_daddr.addr4.s_addr,
+			    ipbuf, sizeof(ipbuf));
+			buf_printf(&sqlbuf, "IPv4ToIPv6(toIPv4('%s')),", ipbuf);
+		} else if (k->k_ipv == 6) {
+			inet_ntop(PF_INET6, &l->l_saddr.addr6.s6_addr,
+			    ipbuf, sizeof(ipbuf));
+			buf_printf(&sqlbuf, "toIPv6('%s')),", ipbuf);
+			inet_ntop(PF_INET6, &l->l_daddr.addr6.s6_addr,
+			    ipbuf, sizeof(ipbuf));
+			buf_printf(&sqlbuf, "toIPv6('%s')),", ipbuf);
 		} else {
-			fprintf(s, "unhex('00000000000000000000000000000000'),"
-			    "unhex('00000000000000000000000000000000'),");
+			buf_printf(&sqlbuf, "toIPv6('::'),toIPv6('::')");
 		}
-		fprintf(s, "%u,%u,%u,'%s')",
+		buf_printf(&sqlbuf, "%u,%u,%u,'%s')",
 		    ntohs(l->l_sport), ntohs(l->l_dport), l->l_qid, l->l_name);
 
 		free(l->l_name);
 		free(l);
 		join = ",\n";
 
-		check_resize_buf(&s, &sqlbuf, &sqllen);
 		++rows;
 	}
-	fprintf(s, ";\n");
-	len = ftell(s);
-	fclose(s);
+	buf_printf(&sqlbuf, ";\n");
 
-	do_clickhouse_sql(sqlbuf, rows, len, "lookup");
-
-
+	do_clickhouse_sql(&sqlbuf, rows, "lookup");
 
 	rows = 0;
 	join = "";
-	s = fmemopen(sqlbuf, sqllen, "w");
-	if (s == NULL)
-		lerr(1, "fmemopen");
-	fprintf(s,
-	    "INSERT INTO\n"
-	    "  rdns (begin_at, end_at, addr, name)\n"
-	    "FORMAT Values\n");
+
+	buf_init(&sqlbuf);
+	buf_cat(&sqlbuf, "INSERT INTO rdns ("
+	    "begin_at, end_at, addr, name"
+	    ")\n" "FORMAT Values\n");
+
 	TAILQ_FOREACH_SAFE(r, &ts->ts_rdns_list, r_entry, nr) {
 		time = ts->ts_end.tv_sec + r->r_ttl;
 		gmtime_r(&time, &tm);
@@ -707,33 +749,30 @@ timeslice_post(void *arg)
 		snprintf(etbuf, sizeof (etbuf), "%s.%03lu", etbuf,
 		    (ts->ts_end.tv_usec / 1000) % 1000);
 
-		fprintf(s, "%s('%s','%s',", join, stbuf, etbuf);
+		buf_printf(&sqlbuf, "%s('%s','%s',", join, stbuf, etbuf);
+
 		if (r->r_ipv == 4) {
-			fprintf(s, "IPv4ToIPv6(toUInt32(%u)),",
-			    ntohl(r->r_addr.addr4.s_addr));
+			inet_ntop(PF_INET, &r->r_addr.addr4.s_addr,
+			    ipbuf, sizeof(ipbuf));
+			buf_printf(&sqlbuf, "IPv4ToIPv6(toIPv4('%s')),", ipbuf);
 		} else if (r->r_ipv == 6) {
-			fprintf(s, "unhex('");
-			for (i = 0; i < sizeof (r->r_addr.addr6.s6_addr); ++i)
-				fprintf(s, "%02x", r->r_addr.addr6.s6_addr[i]);
-			fprintf(s, "'),");
+			inet_ntop(PF_INET6, &r->r_addr.addr6.s6_addr,
+			    ipbuf, sizeof(ipbuf));
+			buf_printf(&sqlbuf, "toIPv6('%s')),", ipbuf);
 		} else {
-			fprintf(s,
-			    "unhex('00000000000000000000000000000000'),");
+			buf_printf(&sqlbuf, "toIPv6('::'),");
 		}
-		fprintf(s, "'%s')", r->r_name);
+		buf_printf(&sqlbuf, "'%s')", r->r_name);
 
 		free(r->r_name);
 		free(r);
 		join = ",\n";
 
-		check_resize_buf(&s, &sqlbuf, &sqllen);
 		++rows;
 	}
-	fprintf(s, ";\n");
-	len = ftell(s);
-	fclose(s);
+	buf_printf(&sqlbuf, ";\n");
 
-	do_clickhouse_sql(sqlbuf, rows, len, "rdns");
+	do_clickhouse_sql(&sqlbuf, rows, "rdns");
 
 	free(ts);
 }
