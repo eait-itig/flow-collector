@@ -1188,6 +1188,9 @@ pkt_count(u_char *arg, const struct pcap_pkthdr *hdr, const u_char *buf)
 
 	f->f_packets = 1;
 	f->f_bytes = pktlen;
+	f->f_syns = 0;
+	f->f_fins = 0;
+	f->f_rsts = 0;
 
 	switch (type) {
 	case htons(ETHERTYPE_IP):
