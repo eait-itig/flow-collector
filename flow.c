@@ -242,8 +242,8 @@ usage(void)
 	extern char *__progname;
 
 	fprintf(stderr, "usage: %s [-46d] [-u user] [-h clickhouse_host] "
-	    "[-p clickhouse_port] [-U clickhouse_user] [-k clickhouse_key] "
-	    "if0 ...\n", __progname);
+	    "[-p clickhouse_port] [-D clickhouse_db] [-U clickhouse_user] "
+	    "[-k clickhouse_key] if0 ...\n", __progname);
 
 	exit(1);
 }
@@ -252,6 +252,7 @@ static int clickhouse_af = PF_UNSPEC;
 static const char *clickhouse_host = "localhost";
 static const char *clickhouse_port = "8123";
 static const char *clickhouse_user = "default";
+static const char *clickhouse_database = NULL;
 static const char *clickhouse_key = NULL;
 static struct addrinfo *clickhouse_res;
 
@@ -287,7 +288,7 @@ main(int argc, char *argv[])
 	if (pagesize < 1024) /* in case we're run on a crappy vax OS */
 		pagesize = 1024;
 
-	while ((ch = getopt(argc, argv, "46du:w:h:p:U:k:")) != -1) {
+	while ((ch = getopt(argc, argv, "46dD:u:w:h:p:U:k:")) != -1) {
 		switch (ch) {
 		case '4':
 			clickhouse_af = PF_INET;
@@ -297,6 +298,9 @@ main(int argc, char *argv[])
 			break;
 		case 'd':
 			debug = 1;
+			break;
+		case 'D':
+			clickhouse_database = optarg;
 			break;
 		case 'u':
 			user = optarg;
@@ -599,6 +603,10 @@ do_clickhouse_sql(const struct buf *sqlbuf, size_t rows, const char *what)
 	buf_printf(&reqbuf, "POST / HTTP/1.0\r\n");
 	buf_printf(&reqbuf, "Host: %s:%s\r\n",
 	    clickhouse_host, clickhouse_port);
+	if (clickhouse_database != NULL) {
+		buf_printf(&reqbuf, "X-ClickHouse-Database: %s\r\n",
+		    clickhouse_database);
+	}
 	buf_printf(&reqbuf, "X-ClickHouse-User: %s\r\n", clickhouse_user);
 	if (clickhouse_key != NULL)
 		buf_printf(&reqbuf, "X-ClickHouse-Key: %s\r\n", clickhouse_key);
