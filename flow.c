@@ -741,7 +741,7 @@ timeslice_post(void *arg)
 			inet_ntop(PF_INET, &l->l_daddr.addr4.s_addr,
 			    ipbuf, sizeof(ipbuf));
 			buf_printf(&sqlbuf, "IPv4ToIPv6(toIPv4('%s')),", ipbuf);
-		} else if (k->k_ipv == 6) {
+		} else if (l->l_ipv == 6) {
 			inet_ntop(PF_INET6, &l->l_saddr.addr6.s6_addr,
 			    ipbuf, sizeof(ipbuf));
 			buf_printf(&sqlbuf, "toIPv6('%s'),", ipbuf);
