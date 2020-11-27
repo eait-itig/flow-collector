@@ -711,7 +711,6 @@ timeslice_post(void *arg)
 
 	do_clickhouse_sql(&sqlbuf, rows, "flow");
 
-#ifdef notyet
 	buf_init(&sqlbuf);
 	buf_cat(&sqlbuf, "INSERT INTO flowstats ("
 	    "begin_at, end_at, packets, bytes, flows, "
@@ -724,7 +723,6 @@ timeslice_post(void *arg)
 	    ts->ts_pcap_ifdrop);
 
 	do_clickhouse_sql(&sqlbuf, 1, "flowstats");
-#endif
 
 	rows = 0;
 	join = "";

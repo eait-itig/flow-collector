@@ -23,6 +23,24 @@ PARTITION BY toStartOfDay(begin_at)
 ORDER BY (vlan, ipv, ipproto, saddr, daddr, sport, dport, gre_key, begin_at, end_at)
 TTL toDateTime(end_at) + toIntervalHour(4);
 
+CREATE TABLE flowstats
+(
+    `begin_at` DateTime64(3) CODEC(DoubleDelta),
+    `end_at` DateTime64(3) CODEC(DoubleDelta),
+    `packets` UInt64 CODEC(Gorilla),
+    `bytes` UInt64 CODEC(Gorilla),
+    `flows` UInt32 CODEC(Gorilla),
+    `pcap_recv` UInt32 CODEC(Gorilla),
+    `pcap_drop` UInt32 CODEC(Gorilla),
+    `pcap_ifdrop` UInt32 CODEC(Gorilla),
+    INDEX begin_at_idx begin_at TYPE minmax GRANULARITY 2048,
+    INDEX end_at_idx end_at TYPE minmax GRANULARITY 2048
+)
+ENGINE = SummingMergeTree()
+PARTITION BY toStartOfDay(begin_at)
+ORDER BY (begin_at, end_at)
+TTL toDateTime(end_at) + toIntervalHour(4);
+
 CREATE TABLE dns_lookups
 (
     `begin_at` DateTime64(3) CODEC(DoubleDelta),
