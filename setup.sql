@@ -77,7 +77,7 @@ CREATE MATERIALIZED VIEW flows_5sec
 ENGINE = SummingMergeTree
 PARTITION BY toStartOfDay(interval)
 ORDER BY (vlan, ipv, ipproto, saddr, daddr, sport, dport, gre_key, interval)
-SELECT
+AS SELECT
     toStartOfInterval(begin_at, toIntervalSecond(5)) AS interval,
     vlan, ipv, ipproto, saddr, daddr, sport, dport, gre_key,
     sum(packets) AS packets,
@@ -113,7 +113,7 @@ CREATE MATERIALIZED VIEW flows_1min
 ENGINE = SummingMergeTree
 PARTITION BY toStartOfDay(interval)
 ORDER BY (vlan, ipv, ipproto, saddr, daddr, sport, dport, gre_key, interval)
-SELECT
+AS SELECT
     toStartOfInterval(begin_at, toIntervalSecond(60)) AS interval,
     vlan, ipv, ipproto, saddr, daddr, sport, dport, gre_key,
     sum(packets) AS packets,
@@ -149,7 +149,7 @@ CREATE MATERIALIZED VIEW flows_5min
 ENGINE = SummingMergeTree
 PARTITION BY toStartOfDay(interval)
 ORDER BY (vlan, ipv, ipproto, saddr, daddr, sport, dport, gre_key, interval)
-SELECT
+AS SELECT
     toStartOfInterval(begin_at, toIntervalSecond(300)) AS interval,
     vlan, ipv, ipproto, saddr, daddr, sport, dport, gre_key,
     sum(packets) AS packets,
@@ -185,7 +185,7 @@ CREATE MATERIALIZED VIEW flows_1hr
 ENGINE = SummingMergeTree
 PARTITION BY toStartOfDay(interval)
 ORDER BY (vlan, ipv, ipproto, saddr, daddr, sport, dport, gre_key, interval)
-SELECT
+AS SELECT
     toStartOfInterval(begin_at, toIntervalSecond(3600)) AS interval,
     vlan, ipv, ipproto, saddr, daddr, sport, dport, gre_key,
     sum(packets) AS packets,
