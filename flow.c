@@ -30,6 +30,7 @@
 #include <errno.h>
 #include <pwd.h>
 #include <paths.h>
+#include <signal.h>
 
 #include <net/if.h>
 #include <net/if_arp.h>
@@ -333,6 +334,8 @@ main(int argc, char *argv[])
 		usage();
 
 	clickhouse_res = clickhouse_resolve();
+
+	signal(SIGPIPE, SIG_IGN);
 
 	if (geteuid())
 		lerrx(1, "need root privileges");
