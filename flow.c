@@ -266,7 +266,7 @@ main(int argc, char *argv[])
 	char errbuf[PCAP_ERRBUF_SIZE];
 	const char *errstr;
 	struct flow_daemon _d = {
-		.d_tv = { 1, 0 },
+		.d_tv = { 2, 500000 },
 		.d_pkt_sources = TAILQ_HEAD_INITIALIZER(_d.d_pkt_sources),
 	};
 	struct flow_daemon *d = &_d;
