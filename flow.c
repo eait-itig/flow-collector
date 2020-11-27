@@ -711,6 +711,21 @@ timeslice_post(void *arg)
 
 	do_clickhouse_sql(&sqlbuf, rows, "flow");
 
+#ifdef notyet
+	buf_init(&sqlbuf);
+	buf_cat(&sqlbuf, "INSERT INTO flowstats ("
+	    "begin_at, end_at, packets, bytes, flows, "
+	    "pcap_recv, pcap_drop, pcap_ifdrop"
+	    ")\n" "FORMAT Values\n");
+	buf_printf(&sqlbuf, "('%s','%s',", stbuf, etbuf);
+	buf_printf(&sqlbuf, "%llu,%llu,%lu,", ts->ts_packets, ts->ts_bytes,
+	    ts->ts_flow_count);
+	buf_printf(&sqlbuf, "%u,%u,%u);\n", ts->ts_pcap_recv, ts->ts_pcap_drop,
+	    ts->ts_pcap_ifdrop);
+
+	do_clickhouse_sql(&sqlbuf, 1, "flowstats");
+#endif
+
 	rows = 0;
 	join = "";
 
