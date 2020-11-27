@@ -693,11 +693,11 @@ timeslice_post(void *arg)
 			buf_printf(&sqlbuf, "IPv4ToIPv6(toIPv4('%s')),", ipbuf);
 		} else if (k->k_ipv == 6) {
 			inet_ntop(PF_INET6, &k->k_saddr6, ipbuf, sizeof(ipbuf));
-			buf_printf(&sqlbuf, "toIPv6('%s')),", ipbuf);
+			buf_printf(&sqlbuf, "toIPv6('%s'),", ipbuf);
 			inet_ntop(PF_INET6, &k->k_daddr6, ipbuf, sizeof(ipbuf));
-			buf_printf(&sqlbuf, "toIPv6('%s')),", ipbuf);
+			buf_printf(&sqlbuf, "toIPv6('%s'),", ipbuf);
 		} else {
-			buf_printf(&sqlbuf, "toIPv6('::'),toIPv6('::')");
+			buf_printf(&sqlbuf, "toIPv6('::'),toIPv6('::'),");
 		}
 		buf_printf(&sqlbuf, "%u,%u,%u,%llu,%llu,%llu,%llu,%llu)",
 		    ntohs(k->k_sport), ntohs(k->k_dport), ntohl(k->k_gre_key),
@@ -731,12 +731,12 @@ timeslice_post(void *arg)
 		} else if (k->k_ipv == 6) {
 			inet_ntop(PF_INET6, &l->l_saddr.addr6.s6_addr,
 			    ipbuf, sizeof(ipbuf));
-			buf_printf(&sqlbuf, "toIPv6('%s')),", ipbuf);
+			buf_printf(&sqlbuf, "toIPv6('%s'),", ipbuf);
 			inet_ntop(PF_INET6, &l->l_daddr.addr6.s6_addr,
 			    ipbuf, sizeof(ipbuf));
-			buf_printf(&sqlbuf, "toIPv6('%s')),", ipbuf);
+			buf_printf(&sqlbuf, "toIPv6('%s'),", ipbuf);
 		} else {
-			buf_printf(&sqlbuf, "toIPv6('::'),toIPv6('::')");
+			buf_printf(&sqlbuf, "toIPv6('::'),toIPv6('::'),");
 		}
 		buf_printf(&sqlbuf, "%u,%u,%u,'%s')",
 		    ntohs(l->l_sport), ntohs(l->l_dport), l->l_qid, l->l_name);
@@ -776,7 +776,7 @@ timeslice_post(void *arg)
 		} else if (r->r_ipv == 6) {
 			inet_ntop(PF_INET6, &r->r_addr.addr6.s6_addr,
 			    ipbuf, sizeof(ipbuf));
-			buf_printf(&sqlbuf, "toIPv6('%s')),", ipbuf);
+			buf_printf(&sqlbuf, "toIPv6('%s'),", ipbuf);
 		} else {
 			buf_printf(&sqlbuf, "toIPv6('::'),");
 		}
