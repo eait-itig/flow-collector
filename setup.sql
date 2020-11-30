@@ -27,6 +27,7 @@ CREATE TABLE flowstats
 (
     `begin_at` DateTime64(3) CODEC(DoubleDelta),
     `end_at` DateTime64(3) CODEC(DoubleDelta),
+    `reads` UInt64 CODEC(Gorilla),
     `packets` UInt64 CODEC(Gorilla),
     `bytes` UInt64 CODEC(Gorilla),
     `flows` UInt32 CODEC(Gorilla),

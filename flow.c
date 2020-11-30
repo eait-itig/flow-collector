@@ -187,6 +187,7 @@ struct timeslice {
 
 	struct timeval		ts_begin;
 	struct timeval		ts_end;
+	uint64_t		ts_reads;
 	uint64_t		ts_packets;
 	uint64_t		ts_bytes;
 
@@ -735,12 +736,12 @@ timeslice_post(void *arg)
 
 	buf_init(&sqlbuf);
 	buf_cat(&sqlbuf, "INSERT INTO flowstats ("
-	    "begin_at, end_at, packets, bytes, flows, "
+	    "begin_at, end_at, reads, packets, bytes, flows, "
 	    "pcap_recv, pcap_drop, pcap_ifdrop"
 	    ")\n" "FORMAT Values\n");
 	buf_printf(&sqlbuf, "('%s','%s',", stbuf, etbuf);
-	buf_printf(&sqlbuf, "%llu,%llu,%lu,", ts->ts_packets, ts->ts_bytes,
-	    ts->ts_flow_count);
+	buf_printf(&sqlbuf, "%llu,%llu,%llu,%lu,", ts->ts_reads,
+	    ts->ts_packets, ts->ts_bytes, ts->ts_flow_count);
 	buf_printf(&sqlbuf, "%u,%u,%u);\n", ts->ts_pcap_recv, ts->ts_pcap_drop,
 	    ts->ts_pcap_ifdrop);
 
@@ -1281,9 +1282,13 @@ void
 pkt_capture(int fd, short events, void *arg)
 {
 	struct pkt_source *ps = arg;
+	struct flow_daemon *d = ps->ps_d;
+	struct timeslice *ts = d->d_ts;
 
-	if (pcap_dispatch(ps->ps_ph, -1, pkt_count, (u_char *)ps->ps_d) < 0)
+	if (pcap_dispatch(ps->ps_ph, -1, pkt_count, (u_char *)d) < 0)
 		lerrx(1, "%s", pcap_geterr(ps->ps_ph));
+
+	ts->ts_reads++;
 }
 
 RBT_GENERATE(flow_tree, flow, f_entry_tree, flow_cmp);
