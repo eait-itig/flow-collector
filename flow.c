@@ -237,6 +237,8 @@ void		pkt_capture(int, short, void *);
 static struct addrinfo *
 		clickhouse_resolve(void);
 
+static int	flow_pcap_filter(pcap_t *);
+
 __dead static void
 usage(void)
 {
@@ -382,6 +384,9 @@ main(int argc, char *argv[])
 		if (pcap_setnonblock(ps->ps_ph, 1, errbuf) != 0)
 			errx(1, "%s", errbuf);
 
+		if (flow_pcap_filter(ps->ps_ph) != 0)
+			errx(1, "%s: %s", argv[ch], pcap_geterr(ps->ps_ph));
+
 		ps->ps_d = d;
 		ps->ps_name = argv[ch];
 		memset(&ps->ps_pstat, 0, sizeof(ps->ps_pstat));
@@ -445,6 +450,20 @@ bpf_maxbufsize(void)
 		return (-1);
 
 	return (maxbuf);
+}
+
+static int
+flow_pcap_filter(pcap_t *p)
+{
+	struct bpf_insn bpf_filter[] = {
+		BPF_STMT(BPF_RET+BPF_K, pcap_snapshot(p)),
+	};
+	struct bpf_program bp = {
+		.bf_insns = bpf_filter,
+		.bf_len = nitems(bpf_filter),
+	};
+
+	return (pcap_setfilter(p, &bp));
 }
 
 static inline int
