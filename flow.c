@@ -871,6 +871,8 @@ flow_tick(int nope, short events, void *arg)
 	TAILQ_FOREACH(ps, &d->d_pkt_sources, ps_entry) {
 		struct pcap_stat pstat;
 
+		pkt_capture(pcap_get_selectable_fd(ps->ps_ph), 0, ps);
+
 		memset(&pstat, 0, sizeof(pstat)); /* for ifdrop */
 
 		if (pcap_stats(ps->ps_ph, &pstat) != 0)
