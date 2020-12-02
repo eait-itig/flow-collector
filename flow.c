@@ -19,6 +19,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/sysctl.h>
+#include <sys/resource.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -187,6 +188,8 @@ struct timeslice {
 
 	struct timeval		ts_begin;
 	struct timeval		ts_end;
+	struct timeval		ts_utime;
+	struct timeval		ts_stime;
 	uint64_t		ts_reads;
 	uint64_t		ts_packets;
 	uint64_t		ts_bytes;
@@ -230,6 +233,9 @@ struct flow_daemon {
 	struct flow		*d_flow;
 
 	struct timeslice	*d_ts;
+
+	struct rusage		 d_rusage[2];
+	unsigned int		 d_rusage_gen;
 };
 
 static int	bpf_maxbufsize(void);
@@ -662,6 +668,17 @@ do_clickhouse_sql(const struct buf *sqlbuf, size_t rows, const char *what)
 	fclose(ss);
 }
 
+static uint32_t
+tv_to_msec(const struct timeval *tv)
+{
+	uint32_t msecs;
+
+	msecs = tv->tv_sec * 1000;
+	msecs += tv->tv_usec / 1000;
+
+	return (msecs);
+}
+
 static void
 timeslice_post(void *arg)
 {
@@ -736,10 +753,13 @@ timeslice_post(void *arg)
 
 	buf_init(&sqlbuf);
 	buf_cat(&sqlbuf, "INSERT INTO flowstats ("
-	    "begin_at, end_at, reads, packets, bytes, flows, "
+	    "begin_at, end_at, user_ms, kern_ms, "
+	    "reads, packets, bytes, flows, "
 	    "pcap_recv, pcap_drop, pcap_ifdrop"
 	    ")\n" "FORMAT Values\n");
 	buf_printf(&sqlbuf, "('%s','%s',", stbuf, etbuf);
+	buf_printf(&sqlbuf, "%u,%u,",
+	    tv_to_msec(&ts->ts_utime), tv_to_msec(&ts->ts_stime));
 	buf_printf(&sqlbuf, "%llu,%llu,%llu,%lu,", ts->ts_reads,
 	    ts->ts_packets, ts->ts_bytes, ts->ts_flow_count);
 	buf_printf(&sqlbuf, "%u,%u,%u);\n", ts->ts_pcap_recv, ts->ts_pcap_drop,
@@ -859,6 +879,8 @@ flow_tick(int nope, short events, void *arg)
 	struct pkt_source *ps;
 	struct timeslice *ts = d->d_ts;
 	struct timeval now;
+	unsigned int gen;
+	struct rusage *oru, *nru;
 
 	gettimeofday(&now, NULL);
 
@@ -884,6 +906,18 @@ flow_tick(int nope, short events, void *arg)
 
 		ps->ps_pstat = pstat;
 	}
+
+	gen = d->d_rusage_gen;
+	oru = &d->d_rusage[gen % nitems(d->d_rusage)];
+	gen++;
+	nru = &d->d_rusage[gen % nitems(d->d_rusage)];
+	d->d_rusage_gen = gen;
+
+	if (getrusage(RUSAGE_THREAD, nru) == -1)
+		lerr(1, "getrusage");
+
+	timersub(&nru->ru_utime, &oru->ru_utime, &ts->ts_utime);
+	timersub(&nru->ru_stime, &oru->ru_stime, &ts->ts_stime);
 
 	ts->ts_end = now;
 	task_add(d->d_taskq, &ts->ts_task);
