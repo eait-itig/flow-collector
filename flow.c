@@ -96,37 +96,29 @@ union flow_addr {
 };
 
 struct flow_key {
+	uint16_t		k_sport;
+	uint16_t		k_dport;
+
 	int			k_vlan;
 #define FLOW_VLAN_UNSET			-1
 	uint8_t			k_ipv;
 	uint8_t			k_ipproto;
+
 	union flow_addr		k_saddr;
 #define k_saddr4			k_saddr.addr4
 #define k_saddr6			k_saddr.addr6
 	union flow_addr		k_daddr;
 #define k_daddr4			k_daddr.addr4
 #define k_daddr6			k_daddr.addr6
-	union {
-		struct {
-			uint16_t	_k_sport;
-			uint16_t	_k_dport;
-		}		_k_ports;
-		struct {
-			uint16_t	_k_flags;
-			uint16_t	_k_proto;
-			uint32_t	_k_key;
-		}		_k_gre;
-	}			k_proto;
-#define k_sport				k_proto._k_ports._k_sport
-#define k_dport				k_proto._k_ports._k_dport
 
-#define k_icmp_type			k_proto._k_ports._k_sport
-#define k_icmp_code			k_proto._k_ports._k_dport
+#define k_icmp_type			k_sport
+#define k_icmp_code			k_dport
 
-#define k_gre_flags			k_proto._k_gre._k_flags
-#define k_gre_proto			k_proto._k_gre._k_proto
-#define k_gre_key			k_proto._k_gre._k_key
-};
+#define k_gre_flags			k_sport
+#define k_gre_proto			k_dport
+
+	uint32_t			k_gre_key;
+} __aligned(8);
 
 struct flow {
 	struct flow_key		f_key;
