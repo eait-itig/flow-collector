@@ -75,7 +75,7 @@ dns_buf_from(const u_char *buf, size_t len)
 {
 	struct dns_buf *db;
 
-	db = calloc(1, sizeof (struct dns_buf));
+	db = calloc(1, sizeof(*db));
 	if (db == NULL)
 		return (NULL);
 	db->db_buf = buf;
@@ -106,9 +106,9 @@ dns_buf_free(struct dns_buf *db)
 static enum dns_parser_rc
 dns_read_uint8(struct dns_buf *db, uint8_t *retp)
 {
-	if (db->db_rem < 1)
+	if (db->db_rem < sizeof(*retp))
 		return (DNS_R_SHORT);
-	db->db_rem--;
+	db->db_rem -= sizeof(*retp);
 	*retp = *db->db_ptr++;
 	return (DNS_R_OK);
 }
@@ -116,13 +116,16 @@ dns_read_uint8(struct dns_buf *db, uint8_t *retp)
 static enum dns_parser_rc
 dns_read_chars(struct dns_buf *db, char *buf, size_t len)
 {
+	size_t i;
+
 	if (db->db_rem < len)
 		return (DNS_R_SHORT);
 	db->db_rem -= len;
-	while (len-- > 0) {
-		if (!isprint(*db->db_ptr))
+	for (i = 0; i < len; i++) {
+		int ch = *db->db_ptr++;
+		if (!isprint(ch))
 			return (DNS_R_ERROR);
-		*(buf++) = *(db->db_ptr++);
+		buf[i] = ch;
 	}
 	return (DNS_R_OK);
 }
@@ -130,9 +133,9 @@ dns_read_chars(struct dns_buf *db, char *buf, size_t len)
 static enum dns_parser_rc
 dns_read_uint16(struct dns_buf *db, uint16_t *retp)
 {
-	if (db->db_rem < 2)
+	if (db->db_rem < sizeof(*retp))
 		return (DNS_R_SHORT);
-	db->db_rem -= 2;
+	db->db_rem -= sizeof(*retp);
 	*retp = *db->db_ptr++ << 8;
 	*retp |= *db->db_ptr++;
 	return (DNS_R_OK);
@@ -141,9 +144,9 @@ dns_read_uint16(struct dns_buf *db, uint16_t *retp)
 static enum dns_parser_rc
 dns_read_uint32(struct dns_buf *db, uint32_t *retp)
 {
-	if (db->db_rem < 4)
+	if (db->db_rem < sizeof(*retp))
 		return (DNS_R_SHORT);
-	db->db_rem -= 4;
+	db->db_rem -= sizeof(*retp);
 	*retp = *db->db_ptr++ << 24;
 	*retp |= *db->db_ptr++ << 16;
 	*retp |= *db->db_ptr++ << 8;
@@ -258,12 +261,12 @@ dns_read_question(struct dns_buf *db, const struct dns_question **retp)
 	enum dns_parser_rc rc;
 	uint16_t tmp16;
 
-	q = calloc(1, sizeof (struct question));
+	q = calloc(1, sizeof(*q));
 	if (q == NULL)
 		return (DNS_R_NOMEM);
 	dq = &q->q;
 
-	if ((rc = dns_read_name(db, q->q_nbuf, sizeof (q->q_nbuf), 3)))
+	if ((rc = dns_read_name(db, q->q_nbuf, sizeof(q->q_nbuf), 3)))
 		goto err;
 	dq->dq_name = q->q_nbuf;
 	if ((rc = dns_read_uint16(db, &tmp16)))
@@ -289,12 +292,12 @@ dns_read_record(struct dns_buf *db, const struct dns_record **retp)
 	enum dns_parser_rc rc;
 	uint16_t tmp16;
 
-	r = calloc(1, sizeof (struct record));
+	r = calloc(1, sizeof(*r));
 	if (r == NULL)
 		return (DNS_R_NOMEM);
 	dr = &r->r;
 
-	if ((rc = dns_read_name(db, r->r_nbuf, sizeof (r->r_nbuf), 3)))
+	if ((rc = dns_read_name(db, r->r_nbuf, sizeof(r->r_nbuf), 3)))
 		goto err;
 	dr->dr_name = r->r_nbuf;
 	if ((rc = dns_read_uint16(db, &tmp16)))
