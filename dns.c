@@ -311,8 +311,10 @@ dns_read_record(struct dns_buf *db, const struct dns_record **retp)
 
 	if ((rc = dns_read_uint16(db, &tmp16)))
 		goto err;
-	if (db->db_rem < tmp16)
-		return (DNS_R_SHORT);
+	if (db->db_rem < tmp16) {
+		rc = DNS_R_SHORT;
+		goto err;
+	}
 	db->db_rem -= tmp16;
 
 	switch (dr->dr_type) {
