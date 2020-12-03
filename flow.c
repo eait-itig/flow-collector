@@ -680,23 +680,191 @@ tv_to_msec(const struct timeval *tv)
 }
 
 static void
+timeslice_post_flows(struct timeslice *ts, struct buf *sqlbuf,
+    const char *st, const char *et)
+{
+	char ipbuf[NI_MAXHOST];
+	struct flow *f, *nf;
+	const struct flow_key *k;
+	size_t rows = 0;
+	const char *join = "";
+
+	if (TAILQ_EMPTY(&ts->ts_flow_list))
+		return;
+
+	buf_init(sqlbuf);
+	buf_cat(sqlbuf, "INSERT INTO flows ("
+	    "begin_at, end_at, vlan, ipv, ipproto, saddr, daddr,"
+	    "sport, dport, gre_key, packets, bytes, syns, fins, rsts"
+	    ")\n" "FORMAT Values\n");
+
+	TAILQ_FOREACH_SAFE(f, &ts->ts_flow_list, f_entry_list, nf) {
+		k = &f->f_key;
+		buf_printf(sqlbuf, "%s('%s','%s',", join, st, et);
+		buf_printf(sqlbuf, "%u,%u,%u,", k->k_vlan, k->k_ipv,
+		    k->k_ipproto);
+		if (k->k_ipv == 4) {
+			inet_ntop(PF_INET, &k->k_saddr4, ipbuf, sizeof(ipbuf));
+			buf_printf(sqlbuf, "IPv4ToIPv6(toIPv4('%s')),", ipbuf);
+			inet_ntop(PF_INET, &k->k_daddr4, ipbuf, sizeof(ipbuf));
+			buf_printf(sqlbuf, "IPv4ToIPv6(toIPv4('%s')),", ipbuf);
+		} else if (k->k_ipv == 6) {
+			inet_ntop(PF_INET6, &k->k_saddr6, ipbuf, sizeof(ipbuf));
+			buf_printf(sqlbuf, "toIPv6('%s'),", ipbuf);
+			inet_ntop(PF_INET6, &k->k_daddr6, ipbuf, sizeof(ipbuf));
+			buf_printf(sqlbuf, "toIPv6('%s'),", ipbuf);
+		} else {
+			buf_printf(sqlbuf, "toIPv6('::'),toIPv6('::'),");
+		}
+		buf_printf(sqlbuf, "%u,%u,%u,%llu,%llu,%llu,%llu,%llu)",
+		    ntohs(k->k_sport), ntohs(k->k_dport), ntohl(k->k_gre_key),
+		    f->f_packets, f->f_bytes, f->f_syns, f->f_fins, f->f_rsts);
+		free(f);
+		join = ",\n";
+
+		++rows;
+	}
+	buf_printf(sqlbuf, ";\n");
+
+	do_clickhouse_sql(sqlbuf, rows, "flow");
+}
+
+static void
+timeslice_post_flowstats(struct timeslice *ts, struct buf *sqlbuf,
+    const char *st, const char *et)
+{
+	buf_init(sqlbuf);
+	buf_cat(sqlbuf, "INSERT INTO flowstats ("
+	    "begin_at, end_at, user_ms, kern_ms, "
+	    "reads, packets, bytes, flows, "
+	    "pcap_recv, pcap_drop, pcap_ifdrop"
+	    ")\n" "FORMAT Values\n");
+	buf_printf(sqlbuf, "('%s','%s',", st, et);
+	buf_printf(sqlbuf, "%u,%u,",
+	    tv_to_msec(&ts->ts_utime), tv_to_msec(&ts->ts_stime));
+	buf_printf(sqlbuf, "%llu,%llu,%llu,%lu,", ts->ts_reads,
+	    ts->ts_packets, ts->ts_bytes, ts->ts_flow_count);
+	buf_printf(sqlbuf, "%u,%u,%u);\n", ts->ts_pcap_recv, ts->ts_pcap_drop,
+	    ts->ts_pcap_ifdrop);
+
+	do_clickhouse_sql(sqlbuf, 1, "flowstats");
+}
+
+static void
+timeslice_post_lookups(struct timeslice *ts, struct buf *sqlbuf,
+    const char *st, const char *et)
+{
+	char ipbuf[NI_MAXHOST];
+	struct lookup *l, *nl;
+	size_t rows = 0;
+	const char *join = "";
+
+	if (TAILQ_EMPTY(&ts->ts_lookup_list))
+		return;
+
+	buf_init(sqlbuf);
+	buf_cat(sqlbuf, "INSERT INTO dns_lookups ("
+	    "begin_at,end_at,saddr,daddr,sport,dport,qid,name"
+	    ")\n" "FORMAT Values\n");
+
+	TAILQ_FOREACH_SAFE(l, &ts->ts_lookup_list, l_entry, nl) {
+		buf_printf(sqlbuf, "%s('%s','%s',", join, st, et);
+		if (l->l_ipv == 4) {
+			inet_ntop(PF_INET, &l->l_saddr.addr4.s_addr,
+			    ipbuf, sizeof(ipbuf));
+			buf_printf(sqlbuf, "IPv4ToIPv6(toIPv4('%s')),", ipbuf);
+			inet_ntop(PF_INET, &l->l_daddr.addr4.s_addr,
+			    ipbuf, sizeof(ipbuf));
+			buf_printf(sqlbuf, "IPv4ToIPv6(toIPv4('%s')),", ipbuf);
+		} else if (l->l_ipv == 6) {
+			inet_ntop(PF_INET6, &l->l_saddr.addr6.s6_addr,
+			    ipbuf, sizeof(ipbuf));
+			buf_printf(sqlbuf, "toIPv6('%s'),", ipbuf);
+			inet_ntop(PF_INET6, &l->l_daddr.addr6.s6_addr,
+			    ipbuf, sizeof(ipbuf));
+			buf_printf(sqlbuf, "toIPv6('%s'),", ipbuf);
+		} else {
+			buf_printf(sqlbuf, "toIPv6('::'),toIPv6('::'),");
+		}
+		buf_printf(sqlbuf, "%u,%u,%u,'%s')",
+		    ntohs(l->l_sport), ntohs(l->l_dport), l->l_qid, l->l_name);
+
+		free(l->l_name);
+		free(l);
+		join = ",\n";
+
+		++rows;
+	}
+	buf_printf(sqlbuf, ";\n");
+
+	do_clickhouse_sql(sqlbuf, rows, "lookup");
+}
+
+static void
+timeslice_post_rdns(struct timeslice *ts, struct buf *sqlbuf,
+    const char *st)
+{
+	char ipbuf[NI_MAXHOST];
+	struct rdns *r, *nr;
+	size_t rows = 0;
+	const char *join = "";
+
+	struct tm tm;
+	time_t time;
+	char et[128];
+
+	if (TAILQ_EMPTY(&ts->ts_rdns_list))
+		return;
+
+	buf_init(sqlbuf);
+	buf_cat(sqlbuf, "INSERT INTO rdns ("
+	    "begin_at, end_at, addr, name"
+	    ")\n" "FORMAT Values\n");
+
+	TAILQ_FOREACH_SAFE(r, &ts->ts_rdns_list, r_entry, nr) {
+		time = ts->ts_end.tv_sec + r->r_ttl;
+		gmtime_r(&time, &tm);
+		et[0] = '\0';
+		strftime(et, sizeof (et), "%Y-%m-%d %H:%M:%S", &tm);
+		snprintf(et, sizeof (et), "%s.%03lu", et,
+		    (ts->ts_end.tv_usec / 1000) % 1000);
+
+		buf_printf(sqlbuf, "%s('%s','%s',", join, st, et);
+
+		if (r->r_ipv == 4) {
+			inet_ntop(PF_INET, &r->r_addr.addr4.s_addr,
+			    ipbuf, sizeof(ipbuf));
+			buf_printf(sqlbuf, "IPv4ToIPv6(toIPv4('%s')),", ipbuf);
+		} else if (r->r_ipv == 6) {
+			inet_ntop(PF_INET6, &r->r_addr.addr6.s6_addr,
+			    ipbuf, sizeof(ipbuf));
+			buf_printf(sqlbuf, "toIPv6('%s'),", ipbuf);
+		} else {
+			buf_printf(sqlbuf, "toIPv6('::'),");
+		}
+		buf_printf(sqlbuf, "'%s')", r->r_name);
+
+		free(r->r_name);
+		free(r);
+		join = ",\n";
+
+		++rows;
+	}
+	buf_printf(sqlbuf, ";\n");
+
+	do_clickhouse_sql(sqlbuf, rows, "rdns");
+}
+
+static void
 timeslice_post(void *arg)
 {
 	struct timeslice *ts = arg;
-	struct flow *f, *nf;
-	struct lookup *l, *nl;
-	struct rdns *r, *nr;
-	size_t rows = 0;
 
 	char stbuf[128], etbuf[128];
-	char ipbuf[NI_MAXHOST];
 	struct tm tm;
 	time_t time;
 
 	static struct buf sqlbuf;
-
-	const struct flow_key *k;
-	const char *join;
 
 	time = ts->ts_begin.tv_sec;
 	gmtime_r(&time, &tm);
@@ -712,141 +880,10 @@ timeslice_post(void *arg)
 	snprintf(etbuf, sizeof (etbuf), "%s.%03lu", etbuf,
 	    (ts->ts_end.tv_usec / 1000) % 1000);
 
-	rows = 0;
-	join = "";
-
-	buf_init(&sqlbuf);
-	buf_cat(&sqlbuf, "INSERT INTO flows ("
-	    "begin_at, end_at, vlan, ipv, ipproto, saddr, daddr,"
-	    "sport, dport, gre_key, packets, bytes, syns, fins, rsts"
-	    ")\n" "FORMAT Values\n");
-
-	TAILQ_FOREACH_SAFE(f, &ts->ts_flow_list, f_entry_list, nf) {
-		k = &f->f_key;
-		buf_printf(&sqlbuf, "%s('%s','%s',", join, stbuf, etbuf);
-		buf_printf(&sqlbuf, "%u,%u,%u,", k->k_vlan, k->k_ipv,
-		    k->k_ipproto);
-		if (k->k_ipv == 4) {
-			inet_ntop(PF_INET, &k->k_saddr4, ipbuf, sizeof(ipbuf));
-			buf_printf(&sqlbuf, "IPv4ToIPv6(toIPv4('%s')),", ipbuf);
-			inet_ntop(PF_INET, &k->k_daddr4, ipbuf, sizeof(ipbuf));
-			buf_printf(&sqlbuf, "IPv4ToIPv6(toIPv4('%s')),", ipbuf);
-		} else if (k->k_ipv == 6) {
-			inet_ntop(PF_INET6, &k->k_saddr6, ipbuf, sizeof(ipbuf));
-			buf_printf(&sqlbuf, "toIPv6('%s'),", ipbuf);
-			inet_ntop(PF_INET6, &k->k_daddr6, ipbuf, sizeof(ipbuf));
-			buf_printf(&sqlbuf, "toIPv6('%s'),", ipbuf);
-		} else {
-			buf_printf(&sqlbuf, "toIPv6('::'),toIPv6('::'),");
-		}
-		buf_printf(&sqlbuf, "%u,%u,%u,%llu,%llu,%llu,%llu,%llu)",
-		    ntohs(k->k_sport), ntohs(k->k_dport), ntohl(k->k_gre_key),
-		    f->f_packets, f->f_bytes, f->f_syns, f->f_fins, f->f_rsts);
-		free(f);
-		join = ",\n";
-
-		++rows;
-	}
-	buf_printf(&sqlbuf, ";\n");
-
-	do_clickhouse_sql(&sqlbuf, rows, "flow");
-
-	buf_init(&sqlbuf);
-	buf_cat(&sqlbuf, "INSERT INTO flowstats ("
-	    "begin_at, end_at, user_ms, kern_ms, "
-	    "reads, packets, bytes, flows, "
-	    "pcap_recv, pcap_drop, pcap_ifdrop"
-	    ")\n" "FORMAT Values\n");
-	buf_printf(&sqlbuf, "('%s','%s',", stbuf, etbuf);
-	buf_printf(&sqlbuf, "%u,%u,",
-	    tv_to_msec(&ts->ts_utime), tv_to_msec(&ts->ts_stime));
-	buf_printf(&sqlbuf, "%llu,%llu,%llu,%lu,", ts->ts_reads,
-	    ts->ts_packets, ts->ts_bytes, ts->ts_flow_count);
-	buf_printf(&sqlbuf, "%u,%u,%u);\n", ts->ts_pcap_recv, ts->ts_pcap_drop,
-	    ts->ts_pcap_ifdrop);
-
-	do_clickhouse_sql(&sqlbuf, 1, "flowstats");
-
-	rows = 0;
-	join = "";
-
-	buf_init(&sqlbuf);
-	buf_cat(&sqlbuf, "INSERT INTO dns_lookups ("
-	    "begin_at,end_at,saddr,daddr,sport,dport,qid,name"
-	    ")\n" "FORMAT Values\n");
-
-	TAILQ_FOREACH_SAFE(l, &ts->ts_lookup_list, l_entry, nl) {
-		buf_printf(&sqlbuf, "%s('%s','%s',", join, stbuf, etbuf);
-		if (l->l_ipv == 4) {
-			inet_ntop(PF_INET, &l->l_saddr.addr4.s_addr,
-			    ipbuf, sizeof(ipbuf));
-			buf_printf(&sqlbuf, "IPv4ToIPv6(toIPv4('%s')),", ipbuf);
-			inet_ntop(PF_INET, &l->l_daddr.addr4.s_addr,
-			    ipbuf, sizeof(ipbuf));
-			buf_printf(&sqlbuf, "IPv4ToIPv6(toIPv4('%s')),", ipbuf);
-		} else if (l->l_ipv == 6) {
-			inet_ntop(PF_INET6, &l->l_saddr.addr6.s6_addr,
-			    ipbuf, sizeof(ipbuf));
-			buf_printf(&sqlbuf, "toIPv6('%s'),", ipbuf);
-			inet_ntop(PF_INET6, &l->l_daddr.addr6.s6_addr,
-			    ipbuf, sizeof(ipbuf));
-			buf_printf(&sqlbuf, "toIPv6('%s'),", ipbuf);
-		} else {
-			buf_printf(&sqlbuf, "toIPv6('::'),toIPv6('::'),");
-		}
-		buf_printf(&sqlbuf, "%u,%u,%u,'%s')",
-		    ntohs(l->l_sport), ntohs(l->l_dport), l->l_qid, l->l_name);
-
-		free(l->l_name);
-		free(l);
-		join = ",\n";
-
-		++rows;
-	}
-	buf_printf(&sqlbuf, ";\n");
-
-	do_clickhouse_sql(&sqlbuf, rows, "lookup");
-
-	rows = 0;
-	join = "";
-
-	buf_init(&sqlbuf);
-	buf_cat(&sqlbuf, "INSERT INTO rdns ("
-	    "begin_at, end_at, addr, name"
-	    ")\n" "FORMAT Values\n");
-
-	TAILQ_FOREACH_SAFE(r, &ts->ts_rdns_list, r_entry, nr) {
-		time = ts->ts_end.tv_sec + r->r_ttl;
-		gmtime_r(&time, &tm);
-		etbuf[0] = '\0';
-		strftime(etbuf, sizeof (etbuf), "%Y-%m-%d %H:%M:%S", &tm);
-		snprintf(etbuf, sizeof (etbuf), "%s.%03lu", etbuf,
-		    (ts->ts_end.tv_usec / 1000) % 1000);
-
-		buf_printf(&sqlbuf, "%s('%s','%s',", join, stbuf, etbuf);
-
-		if (r->r_ipv == 4) {
-			inet_ntop(PF_INET, &r->r_addr.addr4.s_addr,
-			    ipbuf, sizeof(ipbuf));
-			buf_printf(&sqlbuf, "IPv4ToIPv6(toIPv4('%s')),", ipbuf);
-		} else if (r->r_ipv == 6) {
-			inet_ntop(PF_INET6, &r->r_addr.addr6.s6_addr,
-			    ipbuf, sizeof(ipbuf));
-			buf_printf(&sqlbuf, "toIPv6('%s'),", ipbuf);
-		} else {
-			buf_printf(&sqlbuf, "toIPv6('::'),");
-		}
-		buf_printf(&sqlbuf, "'%s')", r->r_name);
-
-		free(r->r_name);
-		free(r);
-		join = ",\n";
-
-		++rows;
-	}
-	buf_printf(&sqlbuf, ";\n");
-
-	do_clickhouse_sql(&sqlbuf, rows, "rdns");
+	timeslice_post_flows(ts, &sqlbuf, stbuf, etbuf);
+	timeslice_post_flowstats(ts, &sqlbuf, stbuf, etbuf);
+	timeslice_post_lookups(ts, &sqlbuf, stbuf, etbuf);
+	timeslice_post_rdns(ts, &sqlbuf, stbuf);
 
 	free(ts);
 }
