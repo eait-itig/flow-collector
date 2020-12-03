@@ -960,79 +960,99 @@ flow_tick(int nope, short events, void *arg)
 	task_add(d->d_taskq, &ts->ts_task);
 }
 
-static void
-pkt_count_dns(struct timeslice *ts, struct flow *f,
-    const u_char *buf, u_int buflen)
+static enum dns_parser_rc
+pkt_count_dns_buf(struct timeslice *ts, struct flow *f, struct dns_buf *db)
 {
-	struct dns_buf *db = NULL;
 	const struct dns_header *h;
-	const struct dns_question *dq;
-	const struct dns_record *dr;
-	struct lookup *l;
-	struct rdns *r;
 	enum dns_parser_rc rc = DNS_R_OK;
 	u_int i;
 
-	db = dns_buf_from(buf, buflen);
-	if (db == NULL)
-		goto nodns;
 	if ((rc = dns_read_header(db, &h)))
-		goto nodns;
+		return (rc);
 	if (h->dh_opcode != DNS_QUERY)
-		goto nodns;
+		return (rc);
 	if ((h->dh_flags & DNS_QR) && h->dh_rcode != DNS_NOERROR)
-		goto nodns;
+		return (rc);
 	if (h->dh_questions > 8 || h->dh_answers > 16)
-		goto nodns;
+		return (rc);
 	for (i = 0; i < h->dh_questions; ++i) {
-		if ((rc = dns_read_question(db, &dq)))
-			goto nodns;
+		const struct dns_question *dq;
+		struct lookup *l;
 
-		l = calloc(1, sizeof (struct lookup));
-		if (l == NULL) {
-			rc = DNS_R_NOMEM;
-			goto nodns;
+		if ((rc = dns_read_question(db, &dq)))
+			return (rc);
+
+		l = calloc(1, sizeof(*l));
+		if (l == NULL)
+			return (DNS_R_NOMEM);
+
+		l->l_name = strdup(dq->dq_name);
+		if (l->l_name == NULL) {
+			free(l);
+			return (DNS_R_NOMEM);
 		}
+
 		l->l_ipv = f->f_key.k_ipv;
 		l->l_saddr = f->f_key.k_saddr;
 		l->l_daddr = f->f_key.k_daddr;
 		l->l_sport = f->f_key.k_sport;
 		l->l_dport = f->f_key.k_dport;
 		l->l_qid = h->dh_id;
-		l->l_name = strdup(dq->dq_name);
+
 		TAILQ_INSERT_TAIL(&ts->ts_lookup_list, l, l_entry);
 	}
+
 	for (i = 0; i < h->dh_answers; ++i) {
+		const struct dns_record *dr;
+		union flow_addr addr;
+		uint8_t ipv;
+		struct rdns *r;
+
 		if ((rc = dns_read_record(db, &dr)))
-			goto nodns;
+			return (rc);
 
 		if (dr->dr_type == DNS_T_A) {
-			r = calloc(1, sizeof (struct rdns));
-			if (r == NULL) {
-				rc = DNS_R_NOMEM;
-				goto nodns;
-			}
-			r->r_ipv = 4;
-			r->r_ttl = dr->dr_ttl;
-			r->r_name = strdup(dr->dr_name);
-			r->r_addr.addr4 = dr->dr_data._dr_a_data;
-			TAILQ_INSERT_TAIL(&ts->ts_rdns_list, r, r_entry);
-
+			ipv = 4;
+			addr.addr4 = dr->dr_data._dr_a_data;
 		} else if (dr->dr_type == DNS_T_AAAA) {
-			r = calloc(1, sizeof (struct rdns));
-			if (r == NULL) {
-				rc = DNS_R_NOMEM;
-				goto nodns;
-			}
-			r->r_ipv = 6;
-			r->r_ttl = dr->dr_ttl;
-			r->r_name = strdup(dr->dr_name);
-			r->r_addr.addr6 = dr->dr_data._dr_aaaa_data;
-			TAILQ_INSERT_TAIL(&ts->ts_rdns_list, r, r_entry);
+			ipv = 6;
+			addr.addr6 = dr->dr_data._dr_aaaa_data;
+		} else
+			continue;
+
+		r = calloc(1, sizeof(*r));
+		if (r == NULL)
+			return (DNS_R_NOMEM);
+
+		r->r_name = strdup(dr->dr_name);
+		if (r->r_name == NULL) {
+			free(r);
+			return (DNS_R_NOMEM);
 		}
+
+		r->r_ipv = ipv;
+		r->r_ttl = dr->dr_ttl;
+		r->r_addr = addr;
+
+		TAILQ_INSERT_TAIL(&ts->ts_rdns_list, r, r_entry);
 	}
 
-nodns:
+	return (DNS_R_OK);
+}
+
+static void
+pkt_count_dns(struct timeslice *ts, struct flow *f,
+    const u_char *buf, u_int buflen)
+{
+	struct dns_buf *db;
+	enum dns_parser_rc rc;
+
+	db = dns_buf_from(buf, buflen);
+	if (db == NULL)
+		return;
+
+	rc = pkt_count_dns_buf(ts, f, db);
+
 	switch (rc) {
 	case DNS_R_OK:
 	case DNS_R_SHORT:
@@ -1047,6 +1067,7 @@ nodns:
 		//linfo("dns: out of memory");
 		break;
 	}
+
 	dns_buf_free(db);
 }
 
