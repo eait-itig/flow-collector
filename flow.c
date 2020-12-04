@@ -165,7 +165,20 @@ TAILQ_HEAD(rdns_list, rdns);
 static inline int
 flow_cmp(const struct flow *a, const struct flow *b)
 {
-	return (memcmp(&a->f_key, &b->f_key, sizeof(a->f_key)));
+	const struct flow_key *ka = &a->f_key;
+	const struct flow_key *kb = &b->f_key;
+	const unsigned long *la = (const unsigned long *)ka;
+	const unsigned long *lb = (const unsigned long *)kb;
+	size_t i;
+
+	for (i = 0; i < sizeof(*ka) / sizeof(*la); i++) {
+		if (la[i] > lb[i])
+			return (1);
+		if (la[i] < lb[i])
+			return (-1);
+	}
+
+	return (0);
 }
 
 RBT_PROTOTYPE(flow_tree, flow, f_entry_tree, flow_cmp);
