@@ -1,6 +1,6 @@
 # flow-collector(8)
 
-flow-collector aggregates IP flow data and stores it in a ClickHouse
+flow-collector aggregates IP flow data for storage in a ClickHouse
 database.
 
 IP flows are generated from packets captured on one or more Ethernet
@@ -8,8 +8,8 @@ interfaces, typically connected to SPAN ports on switches. This
 allows for the aggregation of flow information in a redundant
 switching environment.
 
-Flows are collected within a timeslice, which is 2.5 seconds long
-by default.
+Flows are collected within timeslices, each of which is 2.5 seconds
+long by default.
 
 The collector also features parsing of DNS packets for building
 mappings of IPs to names.
