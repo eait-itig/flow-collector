@@ -199,6 +199,8 @@ struct timeslice {
 	uint64_t		ts_packets;
 	uint64_t		ts_bytes;
 
+	uint64_t		ts_mdrop;
+
 	uint64_t		ts_short_ether;
 	uint64_t		ts_short_vlan;
 	uint64_t		ts_short_ip4;
@@ -742,15 +744,16 @@ timeslice_post_flowstats(struct timeslice *ts, struct buf *sqlbuf,
 	buf_cat(sqlbuf, "INSERT INTO flowstats ("
 	    "begin_at, end_at, user_ms, kern_ms, "
 	    "reads, packets, bytes, flows, "
-	    "pcap_recv, pcap_drop, pcap_ifdrop"
+	    "pcap_recv, pcap_drop, pcap_ifdrop, mdrop"
 	    ")\n" "FORMAT Values\n");
 	buf_printf(sqlbuf, "('%s','%s',", st, et);
 	buf_printf(sqlbuf, "%u,%u,",
 	    tv_to_msec(&ts->ts_utime), tv_to_msec(&ts->ts_stime));
 	buf_printf(sqlbuf, "%llu,%llu,%llu,%lu,", ts->ts_reads,
 	    ts->ts_packets, ts->ts_bytes, ts->ts_flow_count);
-	buf_printf(sqlbuf, "%u,%u,%u);\n", ts->ts_pcap_recv, ts->ts_pcap_drop,
-	    ts->ts_pcap_ifdrop);
+	buf_printf(sqlbuf, "%u,%u,%u,%llu", ts->ts_pcap_recv, ts->ts_pcap_drop,
+	    ts->ts_pcap_ifdrop, ts->ts_mdrop);
+	buf_cat(sqlbuf, ");\n");
 
 	do_clickhouse_sql(sqlbuf, 1, "flowstats");
 }
@@ -1362,9 +1365,13 @@ pkt_count(u_char *arg, const struct pcap_pkthdr *hdr, const u_char *buf)
 
 	of = RBT_INSERT(flow_tree, &ts->ts_flow_tree, f);
 	if (of == NULL) {
-		d->d_flow = malloc(sizeof(*d->d_flow));
-		if (d->d_flow == NULL)
-			lerr(1, "flow alloc");
+		struct flow *nf = malloc(sizeof(*nf));
+		if (nf == NULL) {
+			/* drop this packet due to lack of memory */
+			ts->ts_mdrop++;
+			return;
+		}
+		d->d_flow = nf;
 
 		ts->ts_flow_count++;
 		TAILQ_INSERT_TAIL(&ts->ts_flow_list, f, f_entry_list);

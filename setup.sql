@@ -36,6 +36,7 @@ CREATE TABLE flowstats
     `pcap_recv` UInt32 CODEC(Gorilla),
     `pcap_drop` UInt32 CODEC(Gorilla),
     `pcap_ifdrop` UInt32 CODEC(Gorilla),
+    `mdrop` UInt64 CODEC(Gorilla),
     INDEX begin_at_idx begin_at TYPE minmax GRANULARITY 2048,
     INDEX end_at_idx end_at TYPE minmax GRANULARITY 2048
 )
