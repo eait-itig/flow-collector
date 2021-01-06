@@ -949,7 +949,7 @@ flow_tick(int nope, short events, void *arg)
 		memset(&pstat, 0, sizeof(pstat)); /* for ifdrop */
 
 		if (pcap_stats(ps->ps_ph, &pstat) != 0)
-			errx(1, "%s %s", ps->ps_name, pcap_geterr(ps->ps_ph));
+			lerrx(1, "%s %s", ps->ps_name, pcap_geterr(ps->ps_ph));
 
 		ts->ts_pcap_recv += pstat.ps_recv - ps->ps_pstat.ps_recv;
 		ts->ts_pcap_drop += pstat.ps_drop - ps->ps_pstat.ps_drop;
