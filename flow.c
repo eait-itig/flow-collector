@@ -403,7 +403,11 @@ main(int argc, char *argv[])
 
 		ps->ps_d = d;
 		ps->ps_name = argv[ch];
+
+		/* fetch a baseline */
 		memset(&ps->ps_pstat, 0, sizeof(ps->ps_pstat));
+		if (pcap_stats(ps->ps_ph, &ps->ps_pstat) != 0)
+			errx(1, "%s %s", ps->ps_name, pcap_geterr(ps->ps_ph));
 
 		TAILQ_INSERT_TAIL(&d->d_pkt_sources, ps, ps_entry);
 	}
