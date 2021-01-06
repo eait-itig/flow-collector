@@ -932,8 +932,10 @@ flow_tick(int nope, short events, void *arg)
 	evtimer_add(&d->d_tick, &d->d_tv);
 
 	d->d_ts = timeslice_alloc(&now);
-	if (d->d_ts == NULL)
-		lerr(1, "timeslice alloc");
+	if (d->d_ts == NULL) {
+		/* just make this ts wider if we can't get a new one */
+		return;
+	}
 
 	TAILQ_FOREACH(ps, &d->d_pkt_sources, ps_entry) {
 		struct pcap_stat pstat;
