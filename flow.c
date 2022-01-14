@@ -1374,6 +1374,7 @@ pkt_count(u_char *arg, const struct pcap_pkthdr *hdr, const u_char *buf)
 		struct flow *nf = malloc(sizeof(*nf));
 		if (nf == NULL) {
 			/* drop this packet due to lack of memory */
+			RBT_REMOVE(flow_tree, &ts->ts_flow_tree, f);
 			ts->ts_mdrop++;
 			return;
 		}
