@@ -1212,6 +1212,16 @@ pkt_count_icmp4(struct timeslice *ts, struct flow *f,
 
 	f->f_key.k_icmp_type = htons(icmp4h->icmp_type);
 	f->f_key.k_icmp_code = htons(icmp4h->icmp_code);
+	switch (icmp4h->icmp_type) {
+	case ICMP_ECHO:
+	case ICMP_ECHOREPLY:
+		if (buflen < offsetof(struct icmp, icmp_seq)) {
+			ts->ts_short_ipproto++;
+			return (-1);
+		}
+		f->f_key.k_gre_key = htonl(ntohs(icmp4h->icmp_id));
+		break;
+	}
 
 	return (0);
 }
@@ -1268,6 +1278,17 @@ pkt_count_icmp6(struct timeslice *ts, struct flow *f,
 
 	f->f_key.k_icmp_type = htons(icmp6h->icmp6_type);
 	f->f_key.k_icmp_code = htons(icmp6h->icmp6_code);
+
+	switch (icmp6h->icmp6_type) {
+	case ICMP6_ECHO_REQUEST:
+	case ICMP6_ECHO_REPLY:
+		if (buflen < offsetof(struct icmp6_hdr, icmp6_seq)) {
+			ts->ts_short_ipproto++;
+			return (-1);
+		}
+		f->f_key.k_gre_key = htonl(ntohs(icmp6h->icmp6_id));
+		break;
+	}
 
 	return (0);
 }
