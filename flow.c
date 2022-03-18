@@ -326,6 +326,7 @@ main(int argc, char *argv[])
 			d->d_tv.tv_sec = strtonum(optarg, 1, 900, &errstr);
 			if (errstr != NULL)
 				errx(1, "%s: %s", optarg, errstr);
+			break;
 		case 'h':
 			clickhouse_host = optarg;
 			break;
