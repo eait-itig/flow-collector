@@ -93,6 +93,14 @@ struct esp_header {
 	uint32_t		esp_seq;
 } __packed __aligned(4);
 
+struct ah_header {
+	uint8_t			ah_proto;
+	uint8_t			ah_len;
+	uint16_t		ah_reserved;
+	uint32_t		ah_spi;
+	uint32_t		ah_seq;
+} __packed __aligned(4);
+
 int		rdaemon(int);
 
 union flow_addr {
@@ -1208,6 +1216,24 @@ pkt_count_esp(struct timeslice *ts, struct flow *f,
 }
 
 static int
+pkt_count_ah(struct timeslice *ts, struct flow *f,
+    const u_char *buf, u_int buflen)
+{
+	const struct ah_header *ah;
+
+	if (buflen < sizeof(*ah)) {
+		ts->ts_short_ipproto++;
+		return (-1);
+	}
+
+	ah = (const struct ah_header *)buf;
+
+	f->f_key.k_ipsec_spi = ah->ah_spi;
+
+	return (0);
+}
+
+static int
 pkt_count_ipproto(struct timeslice *ts, struct flow *f,
     const u_char *buf, u_int buflen)
 {
@@ -1221,6 +1247,8 @@ pkt_count_ipproto(struct timeslice *ts, struct flow *f,
 		return (pkt_count_gre(ts, f, buf, buflen));
 	case IPPROTO_ESP:
 		return (pkt_count_esp(ts, f, buf, buflen));
+	case IPPROTO_AH:
+		return (pkt_count_ah(ts, f, buf, buflen));
 	}
 
 	return (0);
