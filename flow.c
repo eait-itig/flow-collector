@@ -928,6 +928,7 @@ flow_tick(int nope, short events, void *arg)
 	struct flow_daemon *d = arg;
 	struct pkt_source *ps;
 	struct timeslice *ts = d->d_ts;
+	struct timeslice *nts;
 	struct timeval now;
 	unsigned int gen;
 	struct rusage *oru, *nru;
@@ -936,11 +937,12 @@ flow_tick(int nope, short events, void *arg)
 
 	evtimer_add(&d->d_tick, &d->d_tv);
 
-	d->d_ts = timeslice_alloc(&now);
-	if (d->d_ts == NULL) {
+	nts = timeslice_alloc(&now);
+	if (nts == NULL) {
 		/* just make this ts wider if we can't get a new one */
 		return;
 	}
+	d->d_ts = nts;
 
 	TAILQ_FOREACH(ps, &d->d_pkt_sources, ps_entry) {
 		struct pcap_stat pstat;
