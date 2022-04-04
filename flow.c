@@ -88,6 +88,11 @@ struct gre_h_key {
 	uint32_t		gre_key;
 } __packed __aligned(4);
 
+struct esp_header {
+	uint32_t		esp_spi;
+	uint32_t		esp_seq;
+} __packed __aligned(4);
+
 int		rdaemon(int);
 
 union flow_addr {
@@ -117,7 +122,8 @@ struct flow_key {
 #define k_gre_flags			k_sport
 #define k_gre_proto			k_dport
 
-	uint32_t			k_gre_key;
+	uint32_t		k_gre_key;
+#define k_ipsec_spi			k_gre_key
 } __aligned(8);
 
 struct flow {
@@ -1184,6 +1190,24 @@ pkt_count_gre(struct timeslice *ts, struct flow *f,
 }
 
 static int
+pkt_count_esp(struct timeslice *ts, struct flow *f,
+    const u_char *buf, u_int buflen)
+{
+	const struct esp_header *eh;
+
+	if (buflen < sizeof(*eh)) {
+		ts->ts_short_ipproto++;
+		return (-1);
+	}
+
+	eh = (const struct esp_header *)buf;
+
+	f->f_key.k_ipsec_spi = eh->esp_spi;
+
+	return (0);
+}
+
+static int
 pkt_count_ipproto(struct timeslice *ts, struct flow *f,
     const u_char *buf, u_int buflen)
 {
@@ -1195,6 +1219,8 @@ pkt_count_ipproto(struct timeslice *ts, struct flow *f,
 		return (pkt_count_udp(ts, f, buf, buflen));
 	case IPPROTO_GRE:
 		return (pkt_count_gre(ts, f, buf, buflen));
+	case IPPROTO_ESP:
+		return (pkt_count_esp(ts, f, buf, buflen));
 	}
 
 	return (0);
