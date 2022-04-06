@@ -1359,6 +1359,7 @@ pkt_count_ip6(struct timeslice *ts, struct flow *f,
     const u_char *buf, u_int buflen)
 {
 	const struct ip6_hdr *ip6;
+	uint8_t nxt;
 
 	if (buflen < sizeof(*ip6)) {
 		ts->ts_short_ip6++;
@@ -1372,12 +1373,32 @@ pkt_count_ip6(struct timeslice *ts, struct flow *f,
 	buf += sizeof(*ip6);
 	buflen -= sizeof(*ip6);
 
+	nxt = ip6->ip6_nxt;
+	if (nxt == IPPROTO_FRAGMENT) {
+		const struct ip6_frag *ip6f;
+
+		if (buflen < sizeof(*ip6f)) {
+			ts->ts_short_ip6++;
+			return (-1);
+		}
+
+		ip6f = (const struct ip6_frag *)buf;
+		if (ntohs(ip6f->ip6f_offlg & IP6F_OFF_MASK) == 0) {
+			/* we can parse the first fragment */
+			buf += sizeof(*ip6f);
+			buflen -= sizeof(*ip6f);
+			nxt = ip6f->ip6f_nxt;
+		}
+
+		f->f_frags = 1;
+	}
+
 	f->f_key.k_ipv = 6;
-	f->f_key.k_ipproto = ip6->ip6_nxt;
+	f->f_key.k_ipproto = nxt;
 	f->f_key.k_saddr6 = ip6->ip6_src;
 	f->f_key.k_daddr6 = ip6->ip6_dst;
 
-	if (f->f_key.k_ipproto == IPPROTO_ICMPV6)
+	if (nxt == IPPROTO_ICMPV6)
 		return (pkt_count_icmp6(ts, f, buf, buflen));
 
 	return (pkt_count_ipproto(ts, f, buf, buflen));
