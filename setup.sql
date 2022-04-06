@@ -12,9 +12,11 @@ CREATE TABLE flows
     `gre_key` UInt32 CODEC(Gorilla),
     `packets` UInt64 CODEC(Gorilla),
     `bytes` UInt64 CODEC(Gorilla),
+    `frags` UInt64 CODEC(Gorilla),
     `syns` UInt32 CODEC(Gorilla),
     `fins` UInt32 CODEC(Gorilla),
     `rsts` UInt32 CODEC(Gorilla),
+    `maxpktlen` UInt32 CODEC(DoubleDelta),
     INDEX begin_at_idx begin_at TYPE minmax GRANULARITY 2048,
     INDEX end_at_idx end_at TYPE minmax GRANULARITY 2048
 )
