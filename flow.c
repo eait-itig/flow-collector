@@ -1326,7 +1326,7 @@ pkt_count_ip4(struct timeslice *ts, struct flow *f,
 	f->f_key.k_daddr4 = iph->ip_dst;
 
 	if (f->f_key.k_ipproto == IPPROTO_ICMP)
-		return (pkt_count_icmp4(ts, f, buf, buflen));
+ 		return (pkt_count_icmp4(ts, f, buf, buflen));
 
 	return (pkt_count_ipproto(ts, f, buf, buflen));
 }
@@ -1390,7 +1390,7 @@ pkt_count_ip6(struct timeslice *ts, struct flow *f,
 		}
 
 		ip6f = (const struct ip6_frag *)buf;
-		if (ntohs(ip6f->ip6f_offlg & IP6F_OFF_MASK) == 0) {
+		if ((ip6f->ip6f_offlg & htons(IP6F_OFF_MASK)) == htons(0)) {
 			/* we can parse the first fragment */
 			buf += sizeof(*ip6f);
 			buflen -= sizeof(*ip6f);
