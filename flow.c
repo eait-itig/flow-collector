@@ -145,6 +145,8 @@ struct flow {
 	uint64_t		f_fins;
 	uint64_t		f_rsts;
 
+	unsigned int		f_max_pktlen;
+
 	RBT_ENTRY(flow)		f_entry_tree;
 	TAILQ_ENTRY(flow)	f_entry_list;
 };
@@ -1464,6 +1466,7 @@ pkt_count(u_char *arg, const struct pcap_pkthdr *hdr, const u_char *buf)
 	f->f_syns = 0;
 	f->f_fins = 0;
 	f->f_rsts = 0;
+	f->f_max_pktlen = pktlen;
 
 	switch (type) {
 	case htons(ETHERTYPE_IP):
@@ -1500,6 +1503,9 @@ pkt_count(u_char *arg, const struct pcap_pkthdr *hdr, const u_char *buf)
 		of->f_syns += f->f_syns;
 		of->f_fins += f->f_fins;
 		of->f_rsts += f->f_rsts;
+
+		if (of->f_max_pktlen < f->f_max_pktlen)
+			of->f_max_pktlen = f->f_max_pktlen;
 	}
 }
 
