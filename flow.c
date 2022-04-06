@@ -139,6 +139,7 @@ struct flow {
 
 	uint64_t		f_packets;
 	uint64_t		f_bytes;
+	uint64_t		f_frags;
 
 	uint64_t		f_syns;
 	uint64_t		f_fins;
@@ -1309,6 +1310,9 @@ pkt_count_ip4(struct timeslice *ts, struct flow *f,
 	buf += hlen;
 	buflen -= hlen;
 
+	if (iph->ip_off & ~(IP_DF | IP_RF))
+		f->f_frags = 1;
+
 	f->f_key.k_ipv = 4;
 	f->f_key.k_ipproto = iph->ip_p;
 	f->f_key.k_saddr4 = iph->ip_src;
@@ -1428,6 +1432,7 @@ pkt_count(u_char *arg, const struct pcap_pkthdr *hdr, const u_char *buf)
 
 	f->f_packets = 1;
 	f->f_bytes = pktlen;
+	f->f_frags = 0;
 	f->f_syns = 0;
 	f->f_fins = 0;
 	f->f_rsts = 0;
@@ -1463,6 +1468,7 @@ pkt_count(u_char *arg, const struct pcap_pkthdr *hdr, const u_char *buf)
 	} else {
 		of->f_packets++;
 		of->f_bytes += f->f_bytes;
+		of->f_frags += f->f_frags;
 		of->f_syns += f->f_syns;
 		of->f_fins += f->f_fins;
 		of->f_rsts += f->f_rsts;
