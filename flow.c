@@ -1290,6 +1290,7 @@ pkt_count_ip4(struct timeslice *ts, struct flow *f,
 {
 	const struct ip *iph;
 	u_int hlen;
+	uint8_t proto;
 
 	if (buflen < sizeof(*iph)) {
 		ts->ts_short_ip4++;
@@ -1310,11 +1311,17 @@ pkt_count_ip4(struct timeslice *ts, struct flow *f,
 	buf += hlen;
 	buflen -= hlen;
 
-	if (iph->ip_off & ~(IP_DF | IP_RF))
+	proto = iph->ip_p;
+
+	if (iph->ip_off & ~(IP_DF | IP_RF)) {
+		if ((iph->ip_off & htons(IP_OFFMASK)) != htons(0))
+			proto = IPPROTO_FRAGMENT;
+
 		f->f_frags = 1;
+	}
 
 	f->f_key.k_ipv = 4;
-	f->f_key.k_ipproto = iph->ip_p;
+	f->f_key.k_ipproto = proto;
 	f->f_key.k_saddr4 = iph->ip_src;
 	f->f_key.k_daddr4 = iph->ip_dst;
 
