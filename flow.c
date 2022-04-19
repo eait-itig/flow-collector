@@ -1304,7 +1304,6 @@ pkt_count_ip4(struct timeslice *ts, struct flow *f,
 		return (-1);
 	}
 
-
 	iph = (const struct ip *)buf;
 
 	/* XXX check ipv and all that poop? */
