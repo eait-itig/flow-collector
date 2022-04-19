@@ -146,6 +146,8 @@ struct flow {
 	uint64_t		f_rsts;
 
 	unsigned int		f_max_pktlen;
+	uint8_t			f_min_ttl;
+	uint8_t			f_max_ttl;
 
 	RBT_ENTRY(flow)		f_entry_tree;
 	TAILQ_ENTRY(flow)	f_entry_list;
@@ -1329,6 +1331,7 @@ pkt_count_ip4(struct timeslice *ts, struct flow *f,
 	f->f_key.k_ipproto = proto;
 	f->f_key.k_saddr4 = iph->ip_src;
 	f->f_key.k_daddr4 = iph->ip_dst;
+	f->f_min_ttl = f->f_max_ttl = iph->ip_ttl;
 
 	if (f->f_key.k_ipproto == IPPROTO_ICMP)
  		return (pkt_count_icmp4(ts, f, buf, buflen));
@@ -1409,6 +1412,7 @@ pkt_count_ip6(struct timeslice *ts, struct flow *f,
 	f->f_key.k_ipproto = nxt;
 	f->f_key.k_saddr6 = ip6->ip6_src;
 	f->f_key.k_daddr6 = ip6->ip6_dst;
+	f->f_min_ttl = f->f_max_ttl = ip6->ip6_hlim;
 
 	if (nxt == IPPROTO_ICMPV6)
 		return (pkt_count_icmp6(ts, f, buf, buflen));
@@ -1470,6 +1474,7 @@ pkt_count(u_char *arg, const struct pcap_pkthdr *hdr, const u_char *buf)
 	f->f_fins = 0;
 	f->f_rsts = 0;
 	f->f_max_pktlen = pktlen;
+	f->f_min_ttl = f->f_max_ttl = 0;
 
 	switch (type) {
 	case htons(ETHERTYPE_IP):
@@ -1509,6 +1514,11 @@ pkt_count(u_char *arg, const struct pcap_pkthdr *hdr, const u_char *buf)
 
 		if (of->f_max_pktlen < f->f_max_pktlen)
 			of->f_max_pktlen = f->f_max_pktlen;
+
+		if (of->f_min_ttl > f->f_min_ttl)
+			of->f_min_ttl = f->f_min_ttl;
+		if (of->f_max_ttl < f->f_max_ttl)
+			of->f_max_ttl = f->f_max_ttl;
 	}
 }
 
