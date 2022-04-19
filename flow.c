@@ -723,8 +723,9 @@ timeslice_post_flows(struct timeslice *ts, struct buf *sqlbuf,
 
 	buf_init(sqlbuf);
 	buf_cat(sqlbuf, "INSERT INTO flows ("
-	    "begin_at, end_at, vlan, ipv, ipproto, saddr, daddr,"
-	    "sport, dport, gre_key, packets, bytes, syns, fins, rsts"
+	    "begin_at, end_at, "
+	    "vlan, ipv, ipproto, saddr, daddr, sport, dport, gre_key, "
+	    "packets, bytes, frags, syns, fins, rsts, maxpktlen"
 	    ")\n" "FORMAT Values\n");
 
 	TAILQ_FOREACH_SAFE(f, &ts->ts_flow_list, f_entry_list, nf) {
@@ -745,9 +746,11 @@ timeslice_post_flows(struct timeslice *ts, struct buf *sqlbuf,
 		} else {
 			buf_printf(sqlbuf, "toIPv6('::'),toIPv6('::'),");
 		}
-		buf_printf(sqlbuf, "%u,%u,%u,%llu,%llu,%llu,%llu,%llu)",
+		buf_printf(sqlbuf,
+		    "%u,%u,%u,%llu,%llu,%llu,%llu,%llu,%llu,%u)",
 		    ntohs(k->k_sport), ntohs(k->k_dport), ntohl(k->k_gre_key),
-		    f->f_packets, f->f_bytes, f->f_syns, f->f_fins, f->f_rsts);
+		    f->f_packets, f->f_bytes, f->f_frags,
+		    f->f_syns, f->f_fins, f->f_rsts, f->f_max_pktlen);
 		free(f);
 		join = ",\n";
 
