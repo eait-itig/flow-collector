@@ -17,6 +17,8 @@ CREATE TABLE flows
     `fins` UInt32 CODEC(Gorilla),
     `rsts` UInt32 CODEC(Gorilla),
     `maxpktlen` UInt32 CODEC(DoubleDelta),
+    `min_ttl` UInt8 CODEC(Gorilla),
+    `max_ttl` UInt8 CODEC(Gorilla),
     INDEX begin_at_idx begin_at TYPE minmax GRANULARITY 2048,
     INDEX end_at_idx end_at TYPE minmax GRANULARITY 2048
 )
