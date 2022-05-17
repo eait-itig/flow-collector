@@ -145,6 +145,7 @@ struct flow {
 	uint64_t		f_fins;
 	uint64_t		f_rsts;
 
+	unsigned int		f_min_pktlen;
 	unsigned int		f_max_pktlen;
 	uint8_t			f_min_ttl;
 	uint8_t			f_max_ttl;
@@ -1474,6 +1475,7 @@ pkt_count(u_char *arg, const struct pcap_pkthdr *hdr, const u_char *buf)
 	f->f_syns = 0;
 	f->f_fins = 0;
 	f->f_rsts = 0;
+	f->f_min_pktlen = pktlen;
 	f->f_max_pktlen = pktlen;
 	f->f_min_ttl = f->f_max_ttl = 0;
 
@@ -1513,6 +1515,8 @@ pkt_count(u_char *arg, const struct pcap_pkthdr *hdr, const u_char *buf)
 		of->f_fins += f->f_fins;
 		of->f_rsts += f->f_rsts;
 
+		if (of->f_min_pktlen > f->f_min_pktlen)
+			of->f_min_pktlen = f->f_min_pktlen;
 		if (of->f_max_pktlen < f->f_max_pktlen)
 			of->f_max_pktlen = f->f_max_pktlen;
 
