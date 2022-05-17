@@ -16,6 +16,8 @@ CREATE TABLE flows
     `syns` UInt32 CODEC(Gorilla),
     `fins` UInt32 CODEC(Gorilla),
     `rsts` UInt32 CODEC(Gorilla),
+    `mintcpwin` UInt16 CODEC(DoubleDelta),
+    `maxtcpwin` UInt16 CODEC(DoubleDelta),
     `minpktlen` UInt32 CODEC(DoubleDelta),
     `maxpktlen` UInt32 CODEC(DoubleDelta),
     `min_ttl` UInt8 CODEC(Gorilla),
