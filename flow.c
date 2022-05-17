@@ -145,6 +145,9 @@ struct flow {
 	uint64_t		f_fins;
 	uint64_t		f_rsts;
 
+	uint16_t		f_min_tcpwin;
+	uint16_t		f_max_tcpwin;
+
 	unsigned int		f_min_pktlen;
 	unsigned int		f_max_pktlen;
 	uint8_t			f_min_ttl;
@@ -1132,6 +1135,7 @@ pkt_count_tcp(struct timeslice *ts, struct flow *f,
 	f->f_syns = (th->th_flags & (TH_SYN | TH_ACK)) == TH_SYN;
 	f->f_fins = (th->th_flags & (TH_FIN | TH_ACK)) == TH_FIN;
 	f->f_rsts = (th->th_flags & (TH_RST | TH_ACK)) == TH_RST;
+	f->f_min_tcpwin = f->f_max_tcpwin = ntohs(th->th_win);
 
 	if ((th->th_dport == htons(53) || th->th_sport == htons(53)) &&
 	    buflen > th->th_off * 4) {
@@ -1476,6 +1480,8 @@ pkt_count(u_char *arg, const struct pcap_pkthdr *hdr, const u_char *buf)
 	f->f_syns = 0;
 	f->f_fins = 0;
 	f->f_rsts = 0;
+	f->f_min_tcpwin = 0;
+	f->f_max_tcpwin = 0;
 	f->f_min_pktlen = pktlen;
 	f->f_max_pktlen = pktlen;
 	f->f_min_ttl = f->f_max_ttl = 0;
@@ -1512,9 +1518,17 @@ pkt_count(u_char *arg, const struct pcap_pkthdr *hdr, const u_char *buf)
 		of->f_packets++;
 		of->f_bytes += f->f_bytes;
 		of->f_frags += f->f_frags;
-		of->f_syns += f->f_syns;
-		of->f_fins += f->f_fins;
-		of->f_rsts += f->f_rsts;
+
+		if (f->f_key.k_ipproto == IPPROTO_TCP) {
+			of->f_syns += f->f_syns;
+			of->f_fins += f->f_fins;
+			of->f_rsts += f->f_rsts;
+
+			if (of->f_min_tcpwin > f->f_min_tcpwin)
+				of->f_min_tcpwin = f->f_min_tcpwin;
+			if (of->f_max_tcpwin < f->f_max_tcpwin)
+				of->f_max_tcpwin = f->f_max_tcpwin;
+		}
 
 		if (of->f_min_pktlen > f->f_min_pktlen)
 			of->f_min_pktlen = f->f_min_pktlen;
