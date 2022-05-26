@@ -1133,9 +1133,12 @@ pkt_count_tcp(struct timeslice *ts, struct flow *f,
 
 	f->f_key.k_sport = th->th_sport;
 	f->f_key.k_dport = th->th_dport;
-	f->f_syns = (th->th_flags & (TH_SYN | TH_ACK)) == TH_SYN;
-	f->f_fins = (th->th_flags & (TH_FIN | TH_ACK)) == TH_FIN;
-	f->f_rsts = (th->th_flags & (TH_RST | TH_ACK)) == TH_RST;
+	if ((th->th_flags & (TH_SYN | TH_ACK)) == TH_SYN)
+		f->f_syns = 1;
+	if (th->th_flags & TH_FIN)
+		f->f_fins = 1;
+	if ((th->th_flags & (TH_RST | TH_ACK)) == TH_RST)
+		f->f_rsts = 1;
 	f->f_min_tcpwin = f->f_max_tcpwin = ntohs(th->th_win);
 
 	if ((th->th_dport == htons(53) || th->th_sport == htons(53)) &&
