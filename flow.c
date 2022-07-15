@@ -66,6 +66,21 @@
 #define ISSET(_v, _m)	((_v) & (_m))
 #endif
 
+static const unsigned int pkt_lens[] = {
+	64,
+	128,
+	256,
+	512,
+	1024,
+	1514,	/* XXX 1500 would make more sense for IP */
+	2048,
+	4096,
+	8192,
+	65535,	/* > 8192 */
+};
+
+#define NUM_PKT_LENS	nitems(pkt_lens)
+
 struct gre_header {
 	uint16_t		gre_flags;
 #define GRE_CP				0x8000	/* Checksum Present */
@@ -144,6 +159,8 @@ struct flow {
 	uint64_t		f_syns;
 	uint64_t		f_fins;
 	uint64_t		f_rsts;
+
+	uint64_t		f_pkt_lens[NUM_PKT_LENS];
 
 	uint16_t		f_min_tcpwin;
 	uint16_t		f_max_tcpwin;
@@ -239,6 +256,7 @@ struct timeslice {
 };
 
 struct timeslice	*timeslice_alloc(const struct timeval *);
+static struct flow	*flow_alloc(void);
 
 struct flow_daemon;
 
@@ -452,7 +470,7 @@ main(int argc, char *argv[])
 	if (d->d_taskq == NULL)
 		err(1, "taskq");
 
-	d->d_flow = malloc(sizeof(*d->d_flow));
+	d->d_flow = flow_alloc();
 	if (d->d_flow == NULL)
 		err(1, NULL);
 
@@ -732,10 +750,13 @@ timeslice_post_flows(struct timeslice *ts, struct buf *sqlbuf,
 	    "begin_at, end_at, "
 	    "vlan, ipv, ipproto, saddr, daddr, sport, dport, gre_key, "
 	    "packets, bytes, frags, syns, fins, rsts, mintcpwin, maxtcpwin, "
-	    "minpktlen, maxpktlen, min_ttl, max_ttl"
+	    "minpktlen, maxpktlen, min_ttl, max_ttl, pkt_lens"
 	    ")\n" "FORMAT Values\n");
 
 	TAILQ_FOREACH_SAFE(f, &ts->ts_flow_list, f_entry_list, nf) {
+		const char *mjoin = "";
+		unsigned int i;
+
 		k = &f->f_key;
 		buf_printf(sqlbuf, "%s('%s','%s',", join, st, et);
 		buf_printf(sqlbuf, "%u,%u,%u,", k->k_vlan, k->k_ipv,
@@ -754,13 +775,25 @@ timeslice_post_flows(struct timeslice *ts, struct buf *sqlbuf,
 			buf_printf(sqlbuf, "toIPv6('::'),toIPv6('::'),");
 		}
 		buf_printf(sqlbuf,
-		    "%u,%u,%u,%llu,%llu,%llu,%llu,%llu,%llu,%u,%u,%u,%u,%u,%u)",
+		    "%u,%u,%u,%llu,%llu,%llu,%llu,%llu,%llu,%u,%u,%u,%u,%u,%u,{",
 		    ntohs(k->k_sport), ntohs(k->k_dport), ntohl(k->k_gre_key),
 		    f->f_packets, f->f_bytes, f->f_frags,
 		    f->f_syns, f->f_fins, f->f_rsts,
 		    f->f_min_tcpwin, f->f_max_tcpwin,
 		    f->f_min_pktlen, f->f_max_pktlen,
 		    f->f_min_ttl, f->f_max_ttl);
+		for (i = 0; i < nitems(f->f_pkt_lens); i++) {
+			uint64_t pkts = f->f_pkt_lens[i];
+			if (pkts == 0)
+				continue;
+
+			buf_printf(sqlbuf, "%s%u:%llu", mjoin,
+			    pkt_lens[i], pkts);
+
+			mjoin = ",";
+		}
+		buf_printf(sqlbuf, "})");
+
 		free(f);
 		join = ",\n";
 
@@ -950,6 +983,22 @@ timeslice_alloc(const struct timeval *now)
 	task_set(&ts->ts_task, timeslice_post, ts);
 
 	return (ts);
+}
+
+static struct flow *
+flow_alloc(void)
+{
+	struct flow *f;
+	size_t i;
+
+	f = malloc(sizeof(*f));
+	if (f == NULL)
+		return (NULL);
+
+	for (i = 0; i < nitems(f->f_pkt_lens); i++)
+		f->f_pkt_lens[i] = 0;
+
+	return (f);
 }
 
 static void
@@ -1431,6 +1480,20 @@ pkt_count_ip6(struct timeslice *ts, struct flow *f,
 	return (pkt_count_ipproto(ts, f, buf, buflen));
 }
 
+static inline unsigned int
+pkt_len_bucket(unsigned int pktlen)
+{
+	unsigned int i;
+
+	/* the last bucket is special */
+	for (i = 0; i < NUM_PKT_LENS - 1; i++) {
+		if (pktlen <= pkt_lens[i])
+			break;
+	}
+
+	return (i);
+}
+
 static void
 pkt_count(u_char *arg, const struct pcap_pkthdr *hdr, const u_char *buf)
 {
@@ -1438,6 +1501,7 @@ pkt_count(u_char *arg, const struct pcap_pkthdr *hdr, const u_char *buf)
 	struct timeslice *ts = d->d_ts;
 	struct flow *f = d->d_flow;
 	struct flow *of;
+	unsigned int len_bucket;
 
 	struct ether_header *eh;
 	uint16_t type;
@@ -1507,7 +1571,7 @@ pkt_count(u_char *arg, const struct pcap_pkthdr *hdr, const u_char *buf)
 
 	of = RBT_INSERT(flow_tree, &ts->ts_flow_tree, f);
 	if (of == NULL) {
-		struct flow *nf = malloc(sizeof(*nf));
+		struct flow *nf = flow_alloc();
 		if (nf == NULL) {
 			/* drop this packet due to lack of memory */
 			RBT_REMOVE(flow_tree, &ts->ts_flow_tree, f);
@@ -1518,6 +1582,8 @@ pkt_count(u_char *arg, const struct pcap_pkthdr *hdr, const u_char *buf)
 
 		ts->ts_flow_count++;
 		TAILQ_INSERT_TAIL(&ts->ts_flow_list, f, f_entry_list);
+
+		of = f;
 	} else {
 		of->f_packets++;
 		of->f_bytes += f->f_bytes;
@@ -1544,6 +1610,9 @@ pkt_count(u_char *arg, const struct pcap_pkthdr *hdr, const u_char *buf)
 		if (of->f_max_ttl < f->f_max_ttl)
 			of->f_max_ttl = f->f_max_ttl;
 	}
+
+	len_bucket = pkt_len_bucket(pktlen);
+	of->f_pkt_lens[len_bucket]++;
 }
 
 void

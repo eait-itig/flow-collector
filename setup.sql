@@ -5,8 +5,8 @@ CREATE TABLE flows
     `vlan` UInt16 CODEC(Gorilla),
     `ipv` UInt8 CODEC(NONE),
     `ipproto` UInt8 CODEC(NONE),
-    `saddr` FixedString(16) CODEC(ZSTD(3)),
-    `daddr` FixedString(16) CODEC(ZSTD(3)),
+    `saddr` IPv6 CODEC(ZSTD(3)),
+    `daddr` IPv6 CODEC(ZSTD(3)),
     `sport` UInt16 CODEC(NONE),
     `dport` UInt16 CODEC(NONE),
     `gre_key` UInt32 CODEC(Gorilla),
@@ -22,6 +22,7 @@ CREATE TABLE flows
     `maxpktlen` UInt32 CODEC(DoubleDelta),
     `min_ttl` UInt8 CODEC(Gorilla),
     `max_ttl` UInt8 CODEC(Gorilla),
+    `pkt_lens` Map(UInt16, UInt64) CODEC(DoubleDelta),
     INDEX begin_at_idx begin_at TYPE minmax GRANULARITY 2048,
     INDEX end_at_idx end_at TYPE minmax GRANULARITY 2048
 )
