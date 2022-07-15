@@ -1380,7 +1380,7 @@ pkt_count_ip4(struct timeslice *ts, struct flow *f,
 
 	proto = iph->ip_p;
 
-	if (iph->ip_off & ~(IP_DF | IP_RF)) {
+	if (iph->ip_off & htons(~(IP_DF | IP_RF))) {
 		if ((iph->ip_off & htons(IP_OFFMASK)) != htons(0))
 			proto = IPPROTO_FRAGMENT;
 
