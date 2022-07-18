@@ -116,6 +116,13 @@ struct ah_header {
 	uint32_t		ah_seq;
 } __packed __aligned(4);
 
+struct sctp_header {
+	uint16_t		sctp_sport;
+	uint16_t		sctp_dport;
+	uint32_t		sctp_vtag;
+	uint32_t		sctp_cksum;
+} __packed __aligned(4);
+
 int		rdaemon(int);
 
 union flow_addr {
@@ -1303,6 +1310,26 @@ pkt_count_ah(struct timeslice *ts, struct flow *f,
 }
 
 static int
+pkt_count_sctp(struct timeslice *ts, struct flow *f,
+    const u_char *buf, u_int buflen)
+{
+	const struct sctp_header *sh;
+
+	if (buflen < sizeof(*sh)) {
+		ts->ts_short_ipproto++;
+		return (-1);
+	}
+
+	sh = (const struct sctp_header *)buf;
+
+	f->f_key.k_sport = sh->sctp_sport;
+	f->f_key.k_dport = sh->sctp_dport;
+	f->f_key.k_gre_key = sh->sctp_vtag;
+
+	return (0);
+}
+
+static int
 pkt_count_ipproto(struct timeslice *ts, struct flow *f,
     const u_char *buf, u_int buflen)
 {
@@ -1318,6 +1345,8 @@ pkt_count_ipproto(struct timeslice *ts, struct flow *f,
 		return (pkt_count_esp(ts, f, buf, buflen));
 	case IPPROTO_AH:
 		return (pkt_count_ah(ts, f, buf, buflen));
+	case IPPROTO_SCTP:
+		return (pkt_count_sctp(ts, f, buf, buflen));
 	}
 
 	return (0);
