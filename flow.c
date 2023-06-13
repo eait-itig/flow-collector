@@ -1028,7 +1028,6 @@ flow_tick(int nope, short events, void *arg)
 		/* just make this ts wider if we can't get a new one */
 		return;
 	}
-	d->d_ts = nts;
 
 	TAILQ_FOREACH(ps, &d->d_pkt_sources, ps_entry) {
 		struct pcap_stat pstat;
@@ -1061,6 +1060,8 @@ flow_tick(int nope, short events, void *arg)
 
 	ts->ts_end = now;
 	task_add(d->d_taskq, &ts->ts_task);
+
+	d->d_ts = nts;
 }
 
 static enum dns_parser_rc
