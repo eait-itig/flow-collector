@@ -765,7 +765,7 @@ timeslice_post_flows(struct timeslice *ts, struct buf *sqlbuf,
 		unsigned int i;
 
 		k = &f->f_key;
-		buf_printf(sqlbuf, "%s('%s','%s',", join, st, et);
+		buf_printf(sqlbuf, "%s(%s,%s,", join, st, et);
 		buf_printf(sqlbuf, "%u,%u,%u,", k->k_vlan, k->k_ipv,
 		    k->k_ipproto);
 		if (k->k_ipv == 4) {
@@ -821,7 +821,7 @@ timeslice_post_flowstats(struct timeslice *ts, struct buf *sqlbuf,
 	    "reads, packets, bytes, flows, "
 	    "pcap_recv, pcap_drop, pcap_ifdrop, mdrop"
 	    ")\n" "FORMAT Values\n");
-	buf_printf(sqlbuf, "('%s','%s',", st, et);
+	buf_printf(sqlbuf, "(%s,%s,", st, et);
 	buf_printf(sqlbuf, "%u,%u,",
 	    tv_to_msec(&ts->ts_utime), tv_to_msec(&ts->ts_stime));
 	buf_printf(sqlbuf, "%llu,%llu,%llu,%lu,", ts->ts_reads,
@@ -851,7 +851,7 @@ timeslice_post_lookups(struct timeslice *ts, struct buf *sqlbuf,
 	    ")\n" "FORMAT Values\n");
 
 	TAILQ_FOREACH_SAFE(l, &ts->ts_lookup_list, l_entry, nl) {
-		buf_printf(sqlbuf, "%s('%s','%s',", join, st, et);
+		buf_printf(sqlbuf, "%s(%s,%s,", join, st, et);
 		if (l->l_ipv == 4) {
 			inet_ntop(PF_INET, &l->l_saddr.addr4.s_addr,
 			    ipbuf, sizeof(ipbuf));
@@ -941,27 +941,14 @@ timeslice_post_rdns(struct timeslice *ts, struct buf *sqlbuf,
 static void
 timeslice_post(void *arg)
 {
+	static struct buf sqlbuf;
 	struct timeslice *ts = arg;
 
 	char stbuf[128], etbuf[128];
-	struct tm tm;
-	time_t time;
-
-	static struct buf sqlbuf;
-
-	time = ts->ts_begin.tv_sec;
-	gmtime_r(&time, &tm);
-	stbuf[0] = '\0';
-	strftime(stbuf, sizeof (stbuf), "%Y-%m-%d %H:%M:%S", &tm);
-	snprintf(stbuf, sizeof (stbuf), "%s.%03lu", stbuf,
-	    (ts->ts_begin.tv_usec / 1000) % 1000);
-
-	time = ts->ts_end.tv_sec;
-	gmtime_r(&time, &tm);
-	etbuf[0] = '\0';
-	strftime(etbuf, sizeof (etbuf), "%Y-%m-%d %H:%M:%S", &tm);
-	snprintf(etbuf, sizeof (etbuf), "%s.%03lu", etbuf,
-	    (ts->ts_end.tv_usec / 1000) % 1000);
+	snprintf(stbuf, sizeof(stbuf), "%lld.%06lld",
+	    (long long)ts->ts_begin.tv_sec, (long long)ts->ts_begin.tv_usec);
+	snprintf(etbuf, sizeof(etbuf), "%lld.%06lld",
+	    (long long)ts->ts_end.tv_sec, (long long)ts->ts_end.tv_usec);
 
 	timeslice_post_flows(ts, &sqlbuf, stbuf, etbuf);
 	timeslice_post_flowstats(ts, &sqlbuf, stbuf, etbuf);
@@ -1235,6 +1222,7 @@ pkt_count_udp(struct timeslice *ts, struct flow *f,
 		buflen -= sizeof (struct udphdr);
 		pkt_count_dns(ts, f, buf, buflen);
 	}
+
 	return (0);
 }
 
