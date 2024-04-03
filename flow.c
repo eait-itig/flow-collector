@@ -165,6 +165,7 @@ struct flow {
 	uint64_t		f_syns;
 	uint64_t		f_fins;
 	uint64_t		f_rsts;
+	uint64_t		f_rstacks;
 
 	uint64_t		f_pkt_lens[NUM_PKT_LENS];
 
@@ -727,7 +728,8 @@ timeslice_post_flows(struct timeslice *ts, struct buf *sqlbuf,
 	buf_cat(sqlbuf, "INSERT INTO flows ("
 	    "begin_at, end_at, "
 	    "vlan, ipv, ipproto, saddr, daddr, sport, dport, gre_key, "
-	    "packets, bytes, frags, syns, fins, rsts, mintcpwin, maxtcpwin, "
+	    "packets, bytes, frags, "
+	    "syns, fins, rsts, rstacks, mintcpwin, maxtcpwin, "
 	    "minpktlen, maxpktlen, min_ttl, max_ttl, pkt_lens"
 	    ")\n" "FORMAT Values\n");
 
@@ -753,10 +755,11 @@ timeslice_post_flows(struct timeslice *ts, struct buf *sqlbuf,
 			buf_printf(sqlbuf, "toIPv6('::'),toIPv6('::'),");
 		}
 		buf_printf(sqlbuf,
-		    "%u,%u,%u,%llu,%llu,%llu,%llu,%llu,%llu,%u,%u,%u,%u,%u,%u,{",
+		    "%u,%u,%u,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
+		    "%u,%u,%u,%u,%u,%u,{",
 		    ntohs(k->k_sport), ntohs(k->k_dport), ntohl(k->k_gre_key),
 		    f->f_packets, f->f_bytes, f->f_frags,
-		    f->f_syns, f->f_fins, f->f_rsts,
+		    f->f_syns, f->f_fins, f->f_rsts, f->f_rstacks,
 		    f->f_min_tcpwin, f->f_max_tcpwin,
 		    f->f_min_pktlen, f->f_max_pktlen,
 		    f->f_min_ttl, f->f_max_ttl);
@@ -932,8 +935,12 @@ pkt_count_tcp(struct timeslice *ts, struct flow *f,
 		f->f_syns = 1;
 	if (th->th_flags & TH_FIN)
 		f->f_fins = 1;
-	if ((th->th_flags & (TH_RST | TH_ACK)) == TH_RST)
-		f->f_rsts = 1;
+	if (th->th_flags & TH_RST) {
+		if (th->th_flags & TH_ACK)
+			f->f_rstacks = 1;
+		else
+			f->f_rsts = 1;
+	}
 	f->f_min_tcpwin = f->f_max_tcpwin = ntohs(th->th_win);
 
 	return (0);
@@ -1298,6 +1305,7 @@ pkt_count(u_char *arg, const struct pcap_pkthdr *hdr, const u_char *buf)
 	f->f_syns = 0;
 	f->f_fins = 0;
 	f->f_rsts = 0;
+	f->f_rstacks = 0;
 	f->f_min_tcpwin = 0;
 	f->f_max_tcpwin = 0;
 	f->f_min_pktlen = pktlen;
@@ -1343,6 +1351,7 @@ pkt_count(u_char *arg, const struct pcap_pkthdr *hdr, const u_char *buf)
 			of->f_syns += f->f_syns;
 			of->f_fins += f->f_fins;
 			of->f_rsts += f->f_rsts;
+			of->f_rstacks += f->f_rstacks;
 
 			if (of->f_min_tcpwin > f->f_min_tcpwin)
 				of->f_min_tcpwin = f->f_min_tcpwin;
