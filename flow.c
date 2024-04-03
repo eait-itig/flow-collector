@@ -56,7 +56,6 @@
 
 #include "log.h"
 #include "task.h"
-#include "dns.h"
 
 #ifndef nitems
 #define nitems(_a)	(sizeof((_a)) / sizeof((_a)[0]))
@@ -184,31 +183,6 @@ struct flow {
 RBT_HEAD(flow_tree, flow);
 TAILQ_HEAD(flow_list, flow);
 
-struct lookup {
-	uint8_t			l_ipv;
-	union flow_addr		l_saddr;
-	union flow_addr		l_daddr;
-	uint16_t		l_sport;
-	uint16_t		l_dport;
-
-	uint16_t		l_qid;
-	char *			l_name;
-
-	TAILQ_ENTRY(lookup)	l_entry;
-};
-
-struct rdns {
-	char *			r_name;
-	uint32_t		r_ttl;
-	uint8_t			r_ipv;
-	union flow_addr		r_addr;
-
-	TAILQ_ENTRY(rdns)	r_entry;
-};
-
-TAILQ_HEAD(lookup_list, lookup);
-TAILQ_HEAD(rdns_list, rdns);
-
 static inline int
 flow_cmp(const struct flow *a, const struct flow *b)
 {
@@ -234,9 +208,6 @@ struct timeslice {
 	unsigned int		ts_flow_count;
 	struct flow_tree	ts_flow_tree;
 	struct flow_list	ts_flow_list;
-
-	struct lookup_list	ts_lookup_list;
-	struct rdns_list	ts_rdns_list;
 
 	struct timeval		ts_begin;
 	struct timeval		ts_end;
@@ -834,111 +805,6 @@ timeslice_post_flowstats(struct timeslice *ts, struct buf *sqlbuf,
 }
 
 static void
-timeslice_post_lookups(struct timeslice *ts, struct buf *sqlbuf,
-    const char *st, const char *et)
-{
-	char ipbuf[NI_MAXHOST];
-	struct lookup *l, *nl;
-	size_t rows = 0;
-	const char *join = "";
-
-	if (TAILQ_EMPTY(&ts->ts_lookup_list))
-		return;
-
-	buf_init(sqlbuf);
-	buf_cat(sqlbuf, "INSERT INTO dns_lookups ("
-	    "begin_at,end_at,saddr,daddr,sport,dport,qid,name"
-	    ")\n" "FORMAT Values\n");
-
-	TAILQ_FOREACH_SAFE(l, &ts->ts_lookup_list, l_entry, nl) {
-		buf_printf(sqlbuf, "%s(%s,%s,", join, st, et);
-		if (l->l_ipv == 4) {
-			inet_ntop(PF_INET, &l->l_saddr.addr4.s_addr,
-			    ipbuf, sizeof(ipbuf));
-			buf_printf(sqlbuf, "IPv4ToIPv6(toIPv4('%s')),", ipbuf);
-			inet_ntop(PF_INET, &l->l_daddr.addr4.s_addr,
-			    ipbuf, sizeof(ipbuf));
-			buf_printf(sqlbuf, "IPv4ToIPv6(toIPv4('%s')),", ipbuf);
-		} else if (l->l_ipv == 6) {
-			inet_ntop(PF_INET6, &l->l_saddr.addr6.s6_addr,
-			    ipbuf, sizeof(ipbuf));
-			buf_printf(sqlbuf, "toIPv6('%s'),", ipbuf);
-			inet_ntop(PF_INET6, &l->l_daddr.addr6.s6_addr,
-			    ipbuf, sizeof(ipbuf));
-			buf_printf(sqlbuf, "toIPv6('%s'),", ipbuf);
-		} else {
-			buf_printf(sqlbuf, "toIPv6('::'),toIPv6('::'),");
-		}
-		buf_printf(sqlbuf, "%u,%u,%u,'%s')",
-		    ntohs(l->l_sport), ntohs(l->l_dport), l->l_qid, l->l_name);
-
-		free(l->l_name);
-		free(l);
-		join = ",\n";
-
-		++rows;
-	}
-	buf_printf(sqlbuf, ";\n");
-
-	do_clickhouse_sql(sqlbuf, rows, "lookup");
-}
-
-static void
-timeslice_post_rdns(struct timeslice *ts, struct buf *sqlbuf,
-    const char *st)
-{
-	char ipbuf[NI_MAXHOST];
-	struct rdns *r, *nr;
-	size_t rows = 0;
-	const char *join = "";
-
-	struct tm tm;
-	time_t time;
-	char et[128];
-
-	if (TAILQ_EMPTY(&ts->ts_rdns_list))
-		return;
-
-	buf_init(sqlbuf);
-	buf_cat(sqlbuf, "INSERT INTO rdns ("
-	    "begin_at, end_at, addr, name"
-	    ")\n" "FORMAT Values\n");
-
-	TAILQ_FOREACH_SAFE(r, &ts->ts_rdns_list, r_entry, nr) {
-		time = ts->ts_end.tv_sec + r->r_ttl;
-		gmtime_r(&time, &tm);
-		et[0] = '\0';
-		strftime(et, sizeof (et), "%Y-%m-%d %H:%M:%S", &tm);
-		snprintf(et, sizeof (et), "%s.%03lu", et,
-		    (ts->ts_end.tv_usec / 1000) % 1000);
-
-		buf_printf(sqlbuf, "%s('%s','%s',", join, st, et);
-
-		if (r->r_ipv == 4) {
-			inet_ntop(PF_INET, &r->r_addr.addr4.s_addr,
-			    ipbuf, sizeof(ipbuf));
-			buf_printf(sqlbuf, "IPv4ToIPv6(toIPv4('%s')),", ipbuf);
-		} else if (r->r_ipv == 6) {
-			inet_ntop(PF_INET6, &r->r_addr.addr6.s6_addr,
-			    ipbuf, sizeof(ipbuf));
-			buf_printf(sqlbuf, "toIPv6('%s'),", ipbuf);
-		} else {
-			buf_printf(sqlbuf, "toIPv6('::'),");
-		}
-		buf_printf(sqlbuf, "'%s')", r->r_name);
-
-		free(r->r_name);
-		free(r);
-		join = ",\n";
-
-		++rows;
-	}
-	buf_printf(sqlbuf, ";\n");
-
-	do_clickhouse_sql(sqlbuf, rows, "rdns");
-}
-
-static void
 timeslice_post(void *arg)
 {
 	static struct buf sqlbuf;
@@ -952,8 +818,6 @@ timeslice_post(void *arg)
 
 	timeslice_post_flows(ts, &sqlbuf, stbuf, etbuf);
 	timeslice_post_flowstats(ts, &sqlbuf, stbuf, etbuf);
-	timeslice_post_lookups(ts, &sqlbuf, stbuf, etbuf);
-	timeslice_post_rdns(ts, &sqlbuf, stbuf);
 
 	free(ts);
 }
@@ -971,8 +835,6 @@ timeslice_alloc(const struct timeval *now)
 	ts->ts_flow_count = 0;
 	RBT_INIT(flow_tree, &ts->ts_flow_tree);
 	TAILQ_INIT(&ts->ts_flow_list);
-	TAILQ_INIT(&ts->ts_lookup_list);
-	TAILQ_INIT(&ts->ts_rdns_list);
 
 	task_set(&ts->ts_task, timeslice_post, ts);
 
@@ -1051,117 +913,6 @@ flow_tick(int nope, short events, void *arg)
 	d->d_ts = nts;
 }
 
-static enum dns_parser_rc
-pkt_count_dns_buf(struct timeslice *ts, struct flow *f, struct dns_buf *db)
-{
-	const struct dns_header *h;
-	enum dns_parser_rc rc = DNS_R_OK;
-	u_int i;
-
-	if ((rc = dns_read_header(db, &h)))
-		return (rc);
-	if (h->dh_opcode != DNS_QUERY)
-		return (rc);
-	if ((h->dh_flags & DNS_QR) && h->dh_rcode != DNS_NOERROR)
-		return (rc);
-	if (h->dh_questions > 8 || h->dh_answers > 16)
-		return (rc);
-	for (i = 0; i < h->dh_questions; ++i) {
-		const struct dns_question *dq;
-		struct lookup *l;
-
-		if ((rc = dns_read_question(db, &dq)))
-			return (rc);
-
-		l = calloc(1, sizeof(*l));
-		if (l == NULL)
-			return (DNS_R_NOMEM);
-
-		l->l_name = strdup(dq->dq_name);
-		if (l->l_name == NULL) {
-			free(l);
-			return (DNS_R_NOMEM);
-		}
-
-		l->l_ipv = f->f_key.k_ipv;
-		l->l_saddr = f->f_key.k_saddr;
-		l->l_daddr = f->f_key.k_daddr;
-		l->l_sport = f->f_key.k_sport;
-		l->l_dport = f->f_key.k_dport;
-		l->l_qid = h->dh_id;
-
-		TAILQ_INSERT_TAIL(&ts->ts_lookup_list, l, l_entry);
-	}
-
-	for (i = 0; i < h->dh_answers; ++i) {
-		const struct dns_record *dr;
-		union flow_addr addr;
-		uint8_t ipv;
-		struct rdns *r;
-
-		if ((rc = dns_read_record(db, &dr)))
-			return (rc);
-
-		if (dr->dr_type == DNS_T_A) {
-			ipv = 4;
-			addr.addr4 = dr->dr_data._dr_a_data;
-		} else if (dr->dr_type == DNS_T_AAAA) {
-			ipv = 6;
-			addr.addr6 = dr->dr_data._dr_aaaa_data;
-		} else
-			continue;
-
-		r = calloc(1, sizeof(*r));
-		if (r == NULL)
-			return (DNS_R_NOMEM);
-
-		r->r_name = strdup(dr->dr_name);
-		if (r->r_name == NULL) {
-			free(r);
-			return (DNS_R_NOMEM);
-		}
-
-		r->r_ipv = ipv;
-		r->r_ttl = dr->dr_ttl;
-		r->r_addr = addr;
-
-		TAILQ_INSERT_TAIL(&ts->ts_rdns_list, r, r_entry);
-	}
-
-	return (DNS_R_OK);
-}
-
-static void
-pkt_count_dns(struct timeslice *ts, struct flow *f,
-    const u_char *buf, u_int buflen)
-{
-	struct dns_buf *db;
-	enum dns_parser_rc rc;
-
-	db = dns_buf_from(buf, buflen);
-	if (db == NULL)
-		return;
-
-	rc = pkt_count_dns_buf(ts, f, db);
-
-	switch (rc) {
-	case DNS_R_OK:
-	case DNS_R_SHORT:
-		break;
-	case DNS_R_PTRLIMIT:
-		//linfo("dns: hit ptr chase limit");
-		break;
-	case DNS_R_ERROR:
-		//linfo("dns: parse error");
-		break;
-	case DNS_R_NOMEM:
-		//linfo("dns: out of memory");
-		break;
-	}
-
-	dns_buf_free(db);
-}
-
 static int
 pkt_count_tcp(struct timeslice *ts, struct flow *f,
     const u_char *buf, u_int buflen)
@@ -1185,18 +936,6 @@ pkt_count_tcp(struct timeslice *ts, struct flow *f,
 		f->f_rsts = 1;
 	f->f_min_tcpwin = f->f_max_tcpwin = ntohs(th->th_win);
 
-	if ((th->th_dport == htons(53) || th->th_sport == htons(53)) &&
-	    buflen > th->th_off * 4) {
-		buf += th->th_off * 4;
-		buflen -= th->th_off * 4;
-		/* TCP DNS queries have a 16-bit length prefix. */
-		if (buflen > 2) {
-			buflen -= 2;
-			buf += 2;
-			pkt_count_dns(ts, f, buf, buflen);
-		}
-	}
-
 	return (0);
 }
 
@@ -1215,13 +954,6 @@ pkt_count_udp(struct timeslice *ts, struct flow *f,
 
 	f->f_key.k_sport = uh->uh_sport;
 	f->f_key.k_dport = uh->uh_dport;
-
-	if ((uh->uh_dport == htons(53) || uh->uh_sport == htons(53)) &&
-	    buflen > sizeof (struct udphdr)) {
-		buf += sizeof (struct udphdr);
-		buflen -= sizeof (struct udphdr);
-		pkt_count_dns(ts, f, buf, buflen);
-	}
 
 	return (0);
 }
