@@ -32,6 +32,7 @@
 #include <pwd.h>
 #include <paths.h>
 #include <signal.h>
+#include <limits.h>
 
 #include <net/if.h>
 #include <net/if_arp.h>
@@ -208,6 +209,7 @@ flow_cmp(const struct flow *a, const struct flow *b)
 RBT_PROTOTYPE(flow_tree, flow, f_entry_tree, flow_cmp);
 
 struct timeslice {
+	const char		*ts_hostname;
 	unsigned int		ts_flow_count;
 	struct flow_tree	ts_flow_tree;
 	struct flow_list	ts_flow_list;
@@ -254,6 +256,7 @@ struct pkt_source {
 TAILQ_HEAD(pkt_sources, pkt_source);
 
 struct flow_daemon {
+	const char		*d_hostname;
 	struct taskq		*d_taskq;
 	struct event		 d_tick;
 	struct timeval		 d_tv;
@@ -301,12 +304,14 @@ static int pagesize;
 int
 main(int argc, char *argv[])
 {
+	char hostname[HOST_NAME_MAX + 1];
 	const char *user = "_flow";
 	char errbuf[PCAP_ERRBUF_SIZE];
 	const char *errstr;
 	struct flow_daemon _d = {
 		.d_tv = { 2, 500000 },
 		.d_pkt_sources = TAILQ_HEAD_INITIALIZER(_d.d_pkt_sources),
+		.d_hostname = hostname,
 	};
 	struct flow_daemon *d = &_d;
 	struct pkt_source *ps;
@@ -327,7 +332,10 @@ main(int argc, char *argv[])
 	if (pagesize < 1024) /* in case we're run on a crappy vax OS */
 		pagesize = 1024;
 
-	while ((ch = getopt(argc, argv, "46dD:u:w:h:p:U:k:")) != -1) {
+	if (gethostname(hostname, sizeof(hostname)) == -1)
+		err(1, "gethostname");
+
+	while ((ch = getopt(argc, argv, "46dD:u:w:h:p:U:k:n:")) != -1) {
 		switch (ch) {
 		case '4':
 			clickhouse_af = PF_INET;
@@ -360,6 +368,9 @@ main(int argc, char *argv[])
 			break;
 		case 'k':
 			clickhouse_key = optarg;
+			break;
+		case 'n':
+			d->d_hostname = optarg;
 			break;
 		default:
 			usage();
@@ -728,7 +739,7 @@ timeslice_post_flows(struct timeslice *ts, struct buf *sqlbuf,
 
 	buf_init(sqlbuf);
 	buf_cat(sqlbuf, "INSERT INTO flows ("
-	    "begin_at, end_at, "
+	    "host, begin_at, end_at, "
 	    "dir_in, dir_out, "
 	    "vlan, ipv, ipproto, saddr, daddr, sport, dport, gre_key, "
 	    "packets, bytes, frags, "
@@ -741,7 +752,8 @@ timeslice_post_flows(struct timeslice *ts, struct buf *sqlbuf,
 		unsigned int i;
 
 		k = &f->f_key;
-		buf_printf(sqlbuf, "%s(%s,%s,", join, st, et);
+		buf_printf(sqlbuf, "%s('%s',%s,%s,", join,
+		    ts->ts_hostname, st, et);
 		buf_printf(sqlbuf, "%s,%s,",
 		    ISSET(k->k_dir, BPF_F_DIR_IN) ? "true" : "false",
 		    ISSET(k->k_dir, BPF_F_DIR_OUT) ? "true" : "false");
@@ -797,11 +809,11 @@ timeslice_post_flowstats(struct timeslice *ts, struct buf *sqlbuf,
 {
 	buf_init(sqlbuf);
 	buf_cat(sqlbuf, "INSERT INTO flowstats ("
-	    "begin_at, end_at, user_ms, kern_ms, "
+	    "host, begin_at, end_at, user_ms, kern_ms, "
 	    "reads, packets, bytes, flows, "
 	    "pcap_recv, pcap_drop, pcap_ifdrop, mdrop"
 	    ")\n" "FORMAT Values\n");
-	buf_printf(sqlbuf, "(%s,%s,", st, et);
+	buf_printf(sqlbuf, "('%s',%s,%s,", ts->ts_hostname, st, et);
 	buf_printf(sqlbuf, "%u,%u,",
 	    tv_to_msec(&ts->ts_utime), tv_to_msec(&ts->ts_stime));
 	buf_printf(sqlbuf, "%llu,%llu,%llu,%lu,", ts->ts_reads,
@@ -917,6 +929,7 @@ flow_tick(int nope, short events, void *arg)
 	timersub(&nru->ru_stime, &oru->ru_stime, &ts->ts_stime);
 
 	ts->ts_end = now;
+	ts->ts_hostname = d->d_hostname;
 	task_add(d->d_taskq, &ts->ts_task);
 
 	d->d_ts = nts;

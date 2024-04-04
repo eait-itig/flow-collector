@@ -1,5 +1,6 @@
 CREATE TABLE flows
 (
+    `host` LowCardinality(String),
     `begin_at` DateTime64(3) CODEC(DoubleDelta),
     `end_at` DateTime64(3) CODEC(DoubleDelta),
     `dir_in` Bool,
@@ -35,6 +36,7 @@ TTL toDateTime(end_at) + toIntervalHour(4);
 
 CREATE TABLE flowstats
 (
+    `host` LowCardinality(String),
     `begin_at` DateTime64(3) CODEC(DoubleDelta),
     `end_at` DateTime64(3) CODEC(DoubleDelta),
     `user_ms` UInt32 CODEC(Gorilla),
@@ -57,6 +59,7 @@ TTL toDateTime(end_at) + toIntervalHour(4);
 
 CREATE TABLE dns_lookups
 (
+    `host` LowCardinality(String),
     `begin_at` DateTime64(3) CODEC(DoubleDelta),
     `end_at` DateTime64(3) CODEC(DoubleDelta),
     `saddr` FixedString(16) CODEC(ZSTD(1)),
@@ -74,6 +77,7 @@ ORDER BY (saddr, daddr, sport, dport, qid, begin_at, end_at);
 
 CREATE TABLE rdns
 (
+    `host` LowCardinality(String),
     `begin_at` DateTime64(3) CODEC(DoubleDelta),
     `end_at` DateTime64(3) CODEC(DoubleDelta),
     `addr` FixedString(16) CODEC(ZSTD(1)),
