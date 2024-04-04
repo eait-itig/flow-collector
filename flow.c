@@ -157,6 +157,15 @@ struct flow_key {
 
 	uint32_t		k_gre_key;
 #define k_ipsec_spi			k_gre_key
+
+	uint32_t		k_ospi;
+
+	union flow_addr		k_osaddr;
+#define k_osaddr4			k_osaddr.addr4
+#define k_osaddr6			k_osaddr.addr6
+	union flow_addr		k_odaddr;
+#define k_odaddr4			k_odaddr.addr4
+#define k_odaddr6			k_odaddr.addr6
 } __aligned(8);
 
 struct flow {
@@ -770,6 +779,7 @@ timeslice_post_flows(struct timeslice *ts, struct buf *sqlbuf,
 	buf_cat(sqlbuf, "INSERT INTO flows ("
 	    "host, begin_at, end_at, "
 	    "dir_in, dir_out, "
+	    "osaddr, odaddr, spi, "
 	    "vlan, ipv, ipproto, saddr, daddr, sport, dport, gre_key, "
 	    "packets, bytes, frags, "
 	    "syns, fins, rsts, rstacks, mintcpwin, maxtcpwin, "
@@ -786,6 +796,11 @@ timeslice_post_flows(struct timeslice *ts, struct buf *sqlbuf,
 		buf_printf(sqlbuf, "%s,%s,",
 		    ISSET(k->k_dir, BPF_F_DIR_IN) ? "true" : "false",
 		    ISSET(k->k_dir, BPF_F_DIR_OUT) ? "true" : "false");
+		inet_ntop(PF_INET6, &k->k_osaddr6, ipbuf, sizeof(ipbuf));
+		buf_printf(sqlbuf, "toIPv6('%s'),", ipbuf);
+		inet_ntop(PF_INET6, &k->k_odaddr6, ipbuf, sizeof(ipbuf));
+		buf_printf(sqlbuf, "toIPv6('%s'),", ipbuf);
+		buf_printf(sqlbuf, "%u,", k->k_ospi);
 		buf_printf(sqlbuf, "%u,%u,%u,", k->k_vlan, k->k_ipv,
 		    k->k_ipproto);
 		if (k->k_ipv == 4) {
