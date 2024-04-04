@@ -243,6 +243,7 @@ struct timeslice	*timeslice_alloc(const struct timeval *);
 static struct flow	*flow_alloc(void);
 
 struct flow_daemon;
+struct flow_pkt;
 
 struct pkt_source {
 	const char		*ps_name;
@@ -252,6 +253,9 @@ struct pkt_source {
 	struct event		 ps_ev;
 
 	TAILQ_ENTRY(pkt_source)	 ps_entry;
+
+	int (*ps_dlt_input)(struct timeslice *, struct flow *,
+	    struct flow_pkt *);
 };
 
 TAILQ_HEAD(pkt_sources, pkt_source);
@@ -278,6 +282,9 @@ static struct addrinfo *
 		clickhouse_resolve(void);
 
 static int	flow_pcap_filter(pcap_t *);
+
+static int	pkt_dlt_ether(struct timeslice *, struct flow *,
+		    struct flow_pkt *);
 
 __dead static void
 usage(void)
@@ -449,6 +456,7 @@ main(int argc, char *argv[])
 
 		switch (dlt) {
 		case DLT_EN10MB:
+			ps->ps_dlt_input = pkt_dlt_ether;
 			break;
 		default:
 			dltname = pcap_datalink_val_to_name(dlt);
@@ -1291,62 +1299,80 @@ pkt_len_bucket(unsigned int pktlen)
 	return (i);
 }
 
-static void
-pkt_count(u_char *arg, const struct pcap_pkthdr *hdr, const u_char *buf)
+struct flow_pkt {
+	const uint8_t	*buf;
+	unsigned int	 buflen;
+	unsigned int	 pktlen;
+	uint16_t	 type; /* network endian ethertype */
+};
+
+static int
+pkt_dlt_ether(struct timeslice *ts, struct flow *f, struct flow_pkt *fp)
 {
-	const struct bpf_hdr *bh;
-	struct flow_daemon *d = (struct flow_daemon *)arg;
-	struct timeslice *ts = d->d_ts;
-	struct flow *f = d->d_flow;
-	struct flow *of;
-	unsigned int len_bucket;
-
 	struct ether_header *eh;
+	unsigned int hlen = sizeof(*eh);
 	uint16_t type;
-	u_int hlen = sizeof(*eh);
 
-	u_int buflen = hdr->caplen;
-	u_int pktlen = hdr->len;
-
-	memset(&f->f_key, 0, sizeof(f->f_key));
-
-	if (buflen < hlen) {
+	if (fp->buflen < hlen) {
 		ts->ts_short_ether++;
-		return;
+		return (-1);
 	}
 
-	eh = (struct ether_header *)buf;
+	eh = (struct ether_header *)fp->buf;
 	type = eh->ether_type;
 
 	if (type == htons(ETHERTYPE_VLAN)) {
 		struct ether_vlan_header *evh;
 		hlen = sizeof(*evh);
 
-		if (buflen < hlen) {
+		if (fp->buflen < hlen) {
 			ts->ts_short_vlan++;
-			return;
+			return (-1);
 		}
 
-		evh = (struct ether_vlan_header *)buf;
+		evh = (struct ether_vlan_header *)fp->buf;
 		f->f_key.k_vlan = EVL_VLANOFTAG(htons(evh->evl_tag));
 		type = evh->evl_proto;
 	} else
 		f->f_key.k_vlan = FLOW_VLAN_UNSET;
 
-	buf += hlen;
-	buflen -= hlen;
-	pktlen -= hlen;
+	fp->buf += hlen;
+	fp->buflen -= hlen;
+	fp->pktlen -= hlen;
+	fp->type = type;
+
+	return (0);
+}
+
+static void
+pkt_count(u_char *arg, const struct pcap_pkthdr *hdr, const u_char *buf)
+{
+	const struct bpf_hdr *bh;
+	struct pkt_source *ps = (struct pkt_source *)arg;
+	struct flow_daemon *d = ps->ps_d;
+	struct timeslice *ts = d->d_ts;
+	struct flow *f = d->d_flow;
+	struct flow *of;
+	unsigned int len_bucket;
+
+	struct flow_pkt fp = {
+		.buf = buf,
+		.buflen = hdr->caplen,
+		.pktlen = hdr->len,
+	};
+
+	memset(&f->f_key, 0, sizeof(f->f_key));
 
 	ts->ts_packets++;
-	ts->ts_bytes += pktlen;
+	ts->ts_bytes += fp.pktlen;
 
-	/*
-	 * XXX this knows too much about how bpf and libpcap interact.
-	 */
-	bh = (const struct bpf_hdr *)hdr;
+	if (ps->ps_dlt_input(ts, f, &fp) != 0)
+		return;
+
+	/* fp should contain an IP packet now */
 
 	f->f_packets = 1;
-	f->f_bytes = pktlen;
+	f->f_bytes = fp.pktlen;
 	f->f_frags = 0;
 	f->f_syns = 0;
 	f->f_fins = 0;
@@ -1354,17 +1380,16 @@ pkt_count(u_char *arg, const struct pcap_pkthdr *hdr, const u_char *buf)
 	f->f_rstacks = 0;
 	f->f_min_tcpwin = 0;
 	f->f_max_tcpwin = 0;
-	f->f_min_pktlen = pktlen;
-	f->f_max_pktlen = pktlen;
+	f->f_min_pktlen = f->f_max_pktlen = fp.pktlen;
 	f->f_min_ttl = f->f_max_ttl = 0;
 
-	switch (type) {
+	switch (fp.type) {
 	case htons(ETHERTYPE_IP):
-		if (pkt_count_ip4(ts, f, buf, buflen) == -1)
+		if (pkt_count_ip4(ts, f, fp.buf, fp.buflen) == -1)
 			return;
 		break;
 	case htons(ETHERTYPE_IPV6):
-		if (pkt_count_ip6(ts, f, buf, buflen) == -1)
+		if (pkt_count_ip6(ts, f, fp.buf, fp.buflen) == -1)
 			return;
 		break;
 
@@ -1373,6 +1398,10 @@ pkt_count(u_char *arg, const struct pcap_pkthdr *hdr, const u_char *buf)
 		return;
 	}
 
+	/*
+	 * XXX this knows too much about how bpf and libpcap interact.
+	 */
+	bh = (const struct bpf_hdr *)hdr;
 	f->f_key.k_dir = bh->bh_flags & BPF_F_DIR_MASK;
 
 	of = RBT_INSERT(flow_tree, &ts->ts_flow_tree, f);
@@ -1418,7 +1447,7 @@ pkt_count(u_char *arg, const struct pcap_pkthdr *hdr, const u_char *buf)
 			of->f_max_ttl = f->f_max_ttl;
 	}
 
-	len_bucket = pkt_len_bucket(pktlen);
+	len_bucket = pkt_len_bucket(fp.pktlen);
 	of->f_pkt_lens[len_bucket]++;
 }
 
@@ -1429,7 +1458,7 @@ pkt_capture(int fd, short events, void *arg)
 	struct flow_daemon *d = ps->ps_d;
 	struct timeslice *ts = d->d_ts;
 
-	if (pcap_dispatch(ps->ps_ph, -1, pkt_count, (u_char *)d) < 0)
+	if (pcap_dispatch(ps->ps_ph, -1, pkt_count, (u_char *)ps) < 0)
 		lerrx(1, "%s", pcap_geterr(ps->ps_ph));
 
 	ts->ts_reads++;
