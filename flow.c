@@ -801,7 +801,7 @@ timeslice_post_flows(struct timeslice *ts, struct buf *sqlbuf,
 		inet_ntop(PF_INET6, &k->k_odaddr6, ipbuf, sizeof(ipbuf));
 		buf_printf(sqlbuf, "toIPv6('%s'),", ipbuf);
 		buf_printf(sqlbuf, "%u,", k->k_ospi);
-		buf_printf(sqlbuf, "%u,%u,%u,", k->k_vlan, k->k_ipv,
+		buf_printf(sqlbuf, "%d,%u,%u,", k->k_vlan, k->k_ipv,
 		    k->k_ipproto);
 		if (k->k_ipv == 4) {
 			inet_ntop(PF_INET, &k->k_saddr4, ipbuf, sizeof(ipbuf));
@@ -1348,8 +1348,7 @@ pkt_dlt_ether(struct timeslice *ts, struct flow *f, struct flow_pkt *fp)
 		evh = (struct ether_vlan_header *)fp->buf;
 		f->f_key.k_vlan = EVL_VLANOFTAG(htons(evh->evl_tag));
 		type = evh->evl_proto;
-	} else
-		f->f_key.k_vlan = FLOW_VLAN_UNSET;
+	}
 
 	fp->buf += hlen;
 	fp->buflen -= hlen;
@@ -1377,6 +1376,7 @@ pkt_count(u_char *arg, const struct pcap_pkthdr *hdr, const u_char *buf)
 	};
 
 	memset(&f->f_key, 0, sizeof(f->f_key));
+	f->f_key.k_vlan = FLOW_VLAN_UNSET;
 
 	ts->ts_packets++;
 	ts->ts_bytes += fp.pktlen;

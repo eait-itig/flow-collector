@@ -8,7 +8,7 @@ CREATE TABLE xflows
     `ospi` UInt32 DEFAULT 0,
     `dir_in` Bool,
     `dir_out` Bool,
-    `vlan` UInt16 CODEC(Gorilla),
+    `vlan` Int16 DEFAULT -1 CODEC(Gorilla),
     `ipv` UInt8 CODEC(NONE),
     `ipproto` UInt8 CODEC(NONE),
     `saddr` IPv6 CODEC(ZSTD(3)),
