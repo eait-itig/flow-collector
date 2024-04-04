@@ -19,6 +19,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/sysctl.h>
+#include <sys/ioctl.h>
 #include <sys/resource.h>
 
 #include <stdio.h>
@@ -405,6 +406,10 @@ main(int argc, char *argv[])
 	}
 
 	for (ch = 0; ch < argc; ch++) {
+		int bpfd;
+		u_int dlt;
+		const char *dltname;
+
 		ps = malloc(sizeof(*ps));
 		if (ps == NULL)
 			err(1, NULL);
@@ -437,6 +442,22 @@ main(int argc, char *argv[])
 
 		ps->ps_d = d;
 		ps->ps_name = argv[ch];
+
+		bpfd = pcap_fileno(ps->ps_ph);
+		if (ioctl(bpfd, BIOCGDLT, &dlt) == -1)
+			err(1, "%s BIOCGDLT", argv[ch]);
+
+		switch (dlt) {
+		case DLT_EN10MB:
+			break;
+		default:
+			dltname = pcap_datalink_val_to_name(dlt);
+			if (dltname == NULL)
+				errx(1, "%s unknown dlt %u", argv[ch], dlt);
+
+			errx(1, "%s unknown dlt %s", argv[ch], dltname);
+			/* NOTREACHED */
+		}
 
 		/* fetch a baseline */
 		memset(&ps->ps_pstat, 0, sizeof(ps->ps_pstat));
