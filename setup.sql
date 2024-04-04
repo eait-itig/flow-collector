@@ -2,6 +2,8 @@ CREATE TABLE flows
 (
     `begin_at` DateTime64(3) CODEC(DoubleDelta),
     `end_at` DateTime64(3) CODEC(DoubleDelta),
+    `dir_in` Bool,
+    `dir_out` Bool,
     `vlan` UInt16 CODEC(Gorilla),
     `ipv` UInt8 CODEC(NONE),
     `ipproto` UInt8 CODEC(NONE),

@@ -35,6 +35,7 @@
 
 #include <net/if.h>
 #include <net/if_arp.h>
+#include <net/bpf.h>
 #include <netdb.h>
 #include <netinet/in_systm.h>
 #include <netinet/in.h>
@@ -137,6 +138,7 @@ struct flow_key {
 #define FLOW_VLAN_UNSET			-1
 	uint8_t			k_ipv;
 	uint8_t			k_ipproto;
+	uint8_t			k_dir;
 
 	union flow_addr		k_saddr;
 #define k_saddr4			k_saddr.addr4
@@ -727,6 +729,7 @@ timeslice_post_flows(struct timeslice *ts, struct buf *sqlbuf,
 	buf_init(sqlbuf);
 	buf_cat(sqlbuf, "INSERT INTO flows ("
 	    "begin_at, end_at, "
+	    "dir_in, dir_out, "
 	    "vlan, ipv, ipproto, saddr, daddr, sport, dport, gre_key, "
 	    "packets, bytes, frags, "
 	    "syns, fins, rsts, rstacks, mintcpwin, maxtcpwin, "
@@ -739,6 +742,9 @@ timeslice_post_flows(struct timeslice *ts, struct buf *sqlbuf,
 
 		k = &f->f_key;
 		buf_printf(sqlbuf, "%s(%s,%s,", join, st, et);
+		buf_printf(sqlbuf, "%s,%s,",
+		    ISSET(k->k_dir, BPF_F_DIR_IN) ? "true" : "false",
+		    ISSET(k->k_dir, BPF_F_DIR_OUT) ? "true" : "false");
 		buf_printf(sqlbuf, "%u,%u,%u,", k->k_vlan, k->k_ipv,
 		    k->k_ipproto);
 		if (k->k_ipv == 4) {
@@ -1254,6 +1260,7 @@ pkt_len_bucket(unsigned int pktlen)
 static void
 pkt_count(u_char *arg, const struct pcap_pkthdr *hdr, const u_char *buf)
 {
+	const struct bpf_hdr *bh;
 	struct flow_daemon *d = (struct flow_daemon *)arg;
 	struct timeslice *ts = d->d_ts;
 	struct flow *f = d->d_flow;
@@ -1299,6 +1306,11 @@ pkt_count(u_char *arg, const struct pcap_pkthdr *hdr, const u_char *buf)
 	ts->ts_packets++;
 	ts->ts_bytes += pktlen;
 
+	/*
+	 * XXX this knows too much about how bpf and libpcap interact.
+	 */
+	bh = (const struct bpf_hdr *)hdr;
+
 	f->f_packets = 1;
 	f->f_bytes = pktlen;
 	f->f_frags = 0;
@@ -1326,6 +1338,8 @@ pkt_count(u_char *arg, const struct pcap_pkthdr *hdr, const u_char *buf)
 		ts->ts_nonip++;
 		return;
 	}
+
+	f->f_key.k_dir = bh->bh_flags & BPF_F_DIR_MASK;
 
 	of = RBT_INSERT(flow_tree, &ts->ts_flow_tree, f);
 	if (of == NULL) {
