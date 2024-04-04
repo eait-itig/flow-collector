@@ -1,4 +1,4 @@
-CREATE TABLE flows
+CREATE TABLE xflows
 (
     `host` LowCardinality(String),
     `begin_at` DateTime64(3) CODEC(DoubleDelta),
