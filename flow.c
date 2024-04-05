@@ -37,6 +37,7 @@
 
 #include <net/if.h>
 #include <net/if_arp.h>
+#include <net/if_enc.h>
 #include <net/bpf.h>
 #include <netdb.h>
 #include <netinet/in_systm.h>
@@ -66,6 +67,11 @@
 
 #ifndef ISSET
 #define ISSET(_v, _m)	((_v) & (_m))
+#endif
+
+/* XXX IPv6 never makes anything easy */
+#ifndef s6_addr32
+#define s6_addr32 __u6_addr.__u6_addr32
 #endif
 
 static const unsigned int pkt_lens[] = {
@@ -294,6 +300,8 @@ static int	flow_pcap_filter(pcap_t *);
 
 static int	pkt_dlt_ether(struct timeslice *, struct flow *,
 		    struct flow_pkt *);
+static int	pkt_dlt_enc(struct timeslice *, struct flow *,
+		    struct flow_pkt *);
 
 __dead static void
 usage(void)
@@ -466,6 +474,9 @@ main(int argc, char *argv[])
 		switch (dlt) {
 		case DLT_EN10MB:
 			ps->ps_dlt_input = pkt_dlt_ether;
+			break;
+		case DLT_ENC:
+			ps->ps_dlt_input = pkt_dlt_enc;
 			break;
 		default:
 			dltname = pcap_datalink_val_to_name(dlt);
@@ -800,7 +811,7 @@ timeslice_post_flows(struct timeslice *ts, struct buf *sqlbuf,
 		buf_printf(sqlbuf, "toIPv6('%s'),", ipbuf);
 		inet_ntop(PF_INET6, &k->k_odaddr6, ipbuf, sizeof(ipbuf));
 		buf_printf(sqlbuf, "toIPv6('%s'),", ipbuf);
-		buf_printf(sqlbuf, "%u,", k->k_ospi);
+		buf_printf(sqlbuf, "%u,", ntohl(k->k_ospi));
 		buf_printf(sqlbuf, "%d,%u,%u,", k->k_vlan, k->k_ipv,
 		    k->k_ipproto);
 		if (k->k_ipv == 4) {
@@ -1349,6 +1360,92 @@ pkt_dlt_ether(struct timeslice *ts, struct flow *f, struct flow_pkt *fp)
 		f->f_key.k_vlan = EVL_VLANOFTAG(htons(evh->evl_tag));
 		type = evh->evl_proto;
 	}
+
+	fp->buf += hlen;
+	fp->buflen -= hlen;
+	fp->pktlen -= hlen;
+	fp->type = type;
+
+	return (0);
+}
+
+static int
+pkt_dlt_enc(struct timeslice *ts, struct flow *f, struct flow_pkt *fp)
+{
+	struct enchdr *eh;
+	unsigned int hlen = sizeof(*eh);
+	unsigned int nhlen;
+	struct ip *ip4h;
+	struct ip6_hdr *ip6h;
+	uint16_t type = 0;
+	int ipproto;
+
+	if (fp->buflen < hlen) {
+		ts->ts_short_ether++;
+		return (-1);
+	}
+
+	eh = (struct enchdr *)fp->buf;
+
+	switch (eh->af) {
+	case AF_INET:
+		nhlen = hlen + sizeof(*ip4h);
+		if (fp->buflen < nhlen) {
+			ts->ts_short_ether++;
+			return (-1);
+		}
+
+		ip4h = (struct ip *)(fp->buf + sizeof(*eh));
+		hlen += ip4h->ip_hl << 4;
+		if (hlen < nhlen || fp->buflen < hlen) {
+			ts->ts_short_ether++;
+			return (-1);
+		}
+
+		ipproto = ip4h->ip_p;
+
+		f->f_key.k_osaddr6.s6_addr32[0] = htonl(0);
+		f->f_key.k_osaddr6.s6_addr32[1] = htonl(0);
+		f->f_key.k_osaddr6.s6_addr32[2] = htonl(0xffff);
+		f->f_key.k_osaddr6.s6_addr32[3] = ip4h->ip_src.s_addr;
+
+		f->f_key.k_odaddr6.s6_addr32[0] = htonl(0);
+		f->f_key.k_odaddr6.s6_addr32[1] = htonl(0);
+		f->f_key.k_odaddr6.s6_addr32[2] = htonl(0xffff);
+		f->f_key.k_odaddr6.s6_addr32[3] = ip4h->ip_dst.s_addr;
+		break;
+
+	case AF_INET6:
+		hlen += sizeof(*ip6h);
+		if (fp->buflen < hlen) {
+			ts->ts_short_ether++;
+			return (-1);
+		}
+
+		ip6h = (struct ip6_hdr *)(fp->buf + sizeof(*eh));
+		ipproto = ip6h->ip6_nxt;
+
+		f->f_key.k_osaddr6 = ip6h->ip6_src;
+		f->f_key.k_odaddr6 = ip6h->ip6_dst;
+		break;
+
+	default:
+		return (-1);
+	}
+
+	switch (ipproto) {
+	case IPPROTO_IPV4:
+		type = htons(ETHERTYPE_IP);
+		break;
+	case IPPROTO_IPV6:
+		type = htons(ETHERTYPE_IPV6);
+		break;
+	default:
+		/* count? */
+		return (-1);
+	}
+
+	f->f_key.k_ospi = eh->spi;
 
 	fp->buf += hlen;
 	fp->buflen -= hlen;
