@@ -1396,7 +1396,7 @@ pkt_dlt_enc(struct timeslice *ts, struct flow *f, struct flow_pkt *fp)
 		}
 
 		ip4h = (struct ip *)(fp->buf + sizeof(*eh));
-		hlen += ip4h->ip_hl << 4;
+		hlen += ip4h->ip_hl << 2;
 		if (hlen < nhlen || fp->buflen < hlen) {
 			ts->ts_short_ether++;
 			return (-1);
