@@ -34,6 +34,8 @@
 #include <paths.h>
 #include <signal.h>
 #include <limits.h>
+#include <poll.h>
+#include <assert.h>
 
 #include <net/if.h>
 #include <net/if_arp.h>
@@ -57,6 +59,8 @@
 
 #include <pcap.h>
 #include <event.h>
+#include <llhttp.h>
+#include <tls.h>
 
 #include "log.h"
 #include "task.h"
@@ -224,7 +228,10 @@ flow_cmp(const struct flow *a, const struct flow *b)
 
 RBT_PROTOTYPE(flow_tree, flow, f_entry_tree, flow_cmp);
 
+struct flow_daemon;
+
 struct timeslice {
+	struct flow_daemon	*ts_d;
 	const char		*ts_hostname;
 	unsigned int		ts_flow_count;
 	struct flow_tree	ts_flow_tree;
@@ -254,10 +261,10 @@ struct timeslice {
 	struct task		ts_task;
 };
 
-struct timeslice	*timeslice_alloc(const struct timeval *);
+struct timeslice	*timeslice_alloc(struct flow_daemon *,
+			     const struct timeval *);
 static struct flow	*flow_alloc(void);
 
-struct flow_daemon;
 struct flow_pkt;
 
 struct pkt_source {
@@ -275,6 +282,14 @@ struct pkt_source {
 
 TAILQ_HEAD(pkt_sources, pkt_source);
 
+struct db_ops {
+	int (*connect)(struct flow_daemon *);
+	ssize_t (*write)(struct flow_daemon *, const void *, size_t);
+	ssize_t (*read)(struct flow_daemon *, void *, size_t);
+	const char *(*strerror)(struct flow_daemon *);
+	void (*close)(struct flow_daemon *);
+};
+
 struct flow_daemon {
 	const char		*d_hostname;
 	struct taskq		*d_taskq;
@@ -288,13 +303,69 @@ struct flow_daemon {
 
 	struct rusage		 d_rusage[2];
 	unsigned int		 d_rusage_gen;
+
+	/* for use by the taskq */
+	const struct db_ops	*d_db_ops;
+
+	int			 d_db_af;
+	const char		*d_db_host;
+	const char		*d_db_port;
+	const char		*d_db_name;
+	const char		*d_db_user;
+	const char		*d_db_pass;
+	const char		*d_db_crt;
+	const char		*d_db_key;
+	const char		*d_db_ca;
+
+	struct addrinfo		*d_db_res;
+
+	struct tls_config	*d_db_tls_cfg;
+	struct tls		*d_db_tls_ctx;
+	int			 d_db_fd;
+
+	llhttp_settings_t	 d_db_llhttp_settings;
+	llhttp_t		 d_db_llhttp;
+
+	unsigned int		 d_db_http_done;
+	unsigned int		 d_db_http_keep_alive;
+};
+
+static int	 db_clr_connect(struct flow_daemon *);
+static ssize_t	 db_clr_read(struct flow_daemon *, void *, size_t);
+static ssize_t	 db_clr_write(struct flow_daemon *, const void *, size_t);
+static const char *
+		 db_clr_strerror(struct flow_daemon *);
+static void	 db_clr_close(struct flow_daemon *);
+
+static const struct db_ops db_clr_ops = {
+	.connect	= db_clr_connect,
+	.read		= db_clr_read,
+	.write		= db_clr_write,
+	.strerror	= db_clr_strerror,
+	.close		= db_clr_close,
+};
+
+static int	 db_tls_connect(struct flow_daemon *);
+static ssize_t	 db_tls_read(struct flow_daemon *, void *, size_t);
+static ssize_t	 db_tls_write(struct flow_daemon *, const void *, size_t);
+static const char *
+		 db_tls_strerror(struct flow_daemon *);
+static void	 db_tls_close(struct flow_daemon *);
+
+static const struct db_ops db_tls_ops = {
+	.connect	= db_tls_connect,
+	.read		= db_tls_read,
+	.write		= db_tls_write,
+	.strerror	= db_tls_strerror,
+	.close		= db_tls_close,
 };
 
 static int	bpf_maxbufsize(void);
 static void	flow_tick(int, short, void *);
 void		pkt_capture(int, short, void *);
-static struct addrinfo *
-		clickhouse_resolve(void);
+static void	clickhouse_resolve(struct flow_daemon *);
+static int	db_connect(struct flow_daemon *);
+static int	http_r_on_message_complete(llhttp_t *);
 
 static int	flow_pcap_filter(pcap_t *);
 
@@ -308,20 +379,12 @@ usage(void)
 {
 	extern char *__progname;
 
-	fprintf(stderr, "usage: %s [-46d] [-u user] [-h clickhouse_host] "
-	    "[-p clickhouse_port] [-D clickhouse_db] [-U clickhouse_user] "
-	    "[-k clickhouse_key] if0 ...\n", __progname);
+	fprintf(stderr, "usage: %s [-46d] [-u user] [-H clickhouse_host] "
+	    "[-S clickhouse_port] [-D clickhouse_db] [-U clickhouse_user] "
+	    "[-P clickhouse_key] if0 ...\n", __progname);
 
 	exit(1);
 }
-
-static int clickhouse_af = PF_UNSPEC;
-static const char *clickhouse_host = "localhost";
-static const char *clickhouse_port = "8123";
-static const char *clickhouse_user = "default";
-static const char *clickhouse_database = NULL;
-static const char *clickhouse_key = NULL;
-static struct addrinfo *clickhouse_res;
 
 static int debug = 0;
 static int pagesize;
@@ -337,6 +400,22 @@ main(int argc, char *argv[])
 		.d_tv = { 2, 500000 },
 		.d_pkt_sources = TAILQ_HEAD_INITIALIZER(_d.d_pkt_sources),
 		.d_hostname = hostname,
+
+		.d_db_af	= PF_UNSPEC,
+		.d_db_host	= "localhost",
+		.d_db_port	= "8123",
+		.d_db_user	= "default",
+		.d_db_name	= "default",
+		.d_db_pass	= NULL,
+
+		.d_db_ops	= &db_clr_ops,
+
+		.d_db_key	= NULL,
+		.d_db_crt	= NULL,
+		.d_db_ca	= "cert.pem",
+
+		.d_db_fd	= -1,
+
 	};
 	struct flow_daemon *d = &_d;
 	struct pkt_source *ps;
@@ -360,44 +439,57 @@ main(int argc, char *argv[])
 	if (gethostname(hostname, sizeof(hostname)) == -1)
 		err(1, "gethostname");
 
-	while ((ch = getopt(argc, argv, "46dD:u:w:h:p:U:k:n:")) != -1) {
+	while ((ch = getopt(argc, argv, "46C:dD:EH:K:n:P:R:S:u:U:w:")) != -1) {
 		switch (ch) {
 		case '4':
-			clickhouse_af = PF_INET;
+			d->d_db_af = PF_INET;
 			break;
 		case '6':
-			clickhouse_af = PF_INET6;
+			d->d_db_af = PF_INET6;
 			break;
 		case 'd':
 			debug = 1;
 			break;
+		case 'C':
+			d->d_db_crt = optarg;
+			break;
 		case 'D':
-			clickhouse_database = optarg;
+			d->d_db_name = optarg;
+			break;
+		case 'E':
+			d->d_db_ops = &db_tls_ops;
+			break;
+		case 'H':
+			d->d_db_host = optarg;
+			break;
+		case 'K':
+			d->d_db_key = optarg;
+			break;
+		case 'n':
+			d->d_hostname = optarg;
+			break;
+		case 'P':
+			d->d_db_key = optarg;
 			break;
 		case 'u':
 			user = optarg;
+			break;
+		case 'R':
+			d->d_db_ca = optarg;
+			break;
+		case 'S':
+			d->d_db_port = optarg;
+			break;
+		case 'U':
+			d->d_db_user = optarg;
 			break;
 		case 'w':
 			d->d_tv.tv_sec = strtonum(optarg, 1, 900, &errstr);
 			if (errstr != NULL)
 				errx(1, "%s: %s", optarg, errstr);
 			break;
-		case 'h':
-			clickhouse_host = optarg;
-			break;
-		case 'p':
-			clickhouse_port = optarg;
-			break;
-		case 'U':
-			clickhouse_user = optarg;
-			break;
-		case 'k':
-			clickhouse_key = optarg;
-			break;
-		case 'n':
-			d->d_hostname = optarg;
-			break;
 		default:
+			warnx("unknown option \'%c\'", ch);
 			usage();
 		}
 	}
@@ -408,12 +500,20 @@ main(int argc, char *argv[])
 	if (argc == 0)
 		usage();
 
-	clickhouse_res = clickhouse_resolve();
+	if ((d->d_db_key == NULL) != (d->d_db_crt == NULL))
+		errx(1, "only one of TLS client key and certificate set");
+
+	if (d->d_db_ops != &db_tls_ops) {
+		if (d->d_db_crt != NULL)
+			errx(1, "client certificate set without TLS enabled");
+	}
+
+	clickhouse_resolve(d);
 
 	signal(SIGPIPE, SIG_IGN);
 
 	if (geteuid())
-		lerrx(1, "need root privileges");
+		errx(1, "need root privileges");
 
 	pw = getpwnam(user);
 	if (pw == NULL)
@@ -517,9 +617,19 @@ main(int argc, char *argv[])
 
 	gettimeofday(&now, NULL);
 
-	d->d_ts = timeslice_alloc(&now);
+	d->d_ts = timeslice_alloc(d, &now);
 	if (d->d_ts == NULL)
 		err(1, NULL);
+
+	if (db_connect(d) == -1)
+		exit(1);
+
+	llhttp_settings_init(&d->d_db_llhttp_settings);
+	d->d_db_llhttp_settings.on_message_complete =
+	    http_r_on_message_complete;
+
+	llhttp_init(&d->d_db_llhttp, HTTP_RESPONSE, &d->d_db_llhttp_settings);
+	d->d_db_llhttp.data = d;
 
 	if (!debug && rdaemon(devnull) == -1)
 		err(1, "unable to daemonize");
@@ -576,28 +686,28 @@ flow_gre_key_valid(const struct flow *f)
 	return (v == htons(GRE_VERS_0|GRE_KP));
 }
 
-static struct addrinfo *
-clickhouse_resolve(void)
+static void
+clickhouse_resolve(struct flow_daemon *d)
 {
 	struct addrinfo hints, *res0;
 	int error;
 
 	memset(&hints, 0, sizeof(hints));
-	hints.ai_family = clickhouse_af;
+	hints.ai_family = d->d_db_af;
 	hints.ai_socktype = SOCK_STREAM;
-	error = getaddrinfo(clickhouse_host, clickhouse_port, &hints, &res0);
+	error = getaddrinfo(d->d_db_host, d->d_db_port, &hints, &res0);
 	if (error) {
 		errx(1, "clickhouse host %s port %s resolve: %s",
-		    clickhouse_host, clickhouse_port, gai_strerror(error));
+		    d->d_db_host, d->d_db_port, gai_strerror(error));
 	}
 
-	return (res0);
+	d->d_db_res = res0;
 }
 
 static int
-clickhouse_connect(void)
+clickhouse_connect(struct flow_daemon *d)
 {
-	struct addrinfo *res0 = clickhouse_res, *res;
+	struct addrinfo *res0 = d->d_db_res, *res;
 	int serrno;
 	int s;
 	const char *cause = NULL;
@@ -625,7 +735,7 @@ clickhouse_connect(void)
 	if (s == -1) {
 		errno = serrno;
 		lwarnx("clickhouse host %s port %s %s",
-		    clickhouse_host, clickhouse_port, cause);
+		    d->d_db_host, d->d_db_port, cause);
 		return (-1);
 	}
 
@@ -706,60 +816,370 @@ buf_printf(struct buf *b, const char *fmt, ...)
 	b->off = off;
 }
 
+static int
+db_clr_connect(struct flow_daemon *d)
+{
+	int s = clickhouse_connect(d);
+	if (s == -1)
+		return (-1);
+
+	d->d_db_fd = s;
+
+	return (0);
+}
+
+static ssize_t
+db_clr_read(struct flow_daemon *d, void *buf, size_t len)
+{
+	return (read(d->d_db_fd, buf, len));
+}
+
+static ssize_t
+db_clr_write(struct flow_daemon *d, const void *buf, size_t len)
+{
+	return (write(d->d_db_fd, buf, len));
+}
+
+static const char *
+db_clr_strerror(struct flow_daemon *d)
+{
+	return (strerror(errno));
+}
+
 static void
-do_clickhouse_sql(const struct buf *sqlbuf, size_t rows, const char *what)
+db_clr_close(struct flow_daemon *d)
+{
+	close(d->d_db_fd);
+}
+
+static int
+db_tls_connect(struct flow_daemon *d)
+{
+	int s;
+
+	struct tls_config *cfg;
+	struct tls *ctx;
+
+	s = clickhouse_connect(d);
+	if (s == -1)
+		return (-1);
+
+	cfg = tls_config_new();
+	if (cfg == NULL) {
+		lwarnx("unable to create new tls config");
+		goto close;
+	}
+
+        if (tls_config_set_ca_file(cfg, d->d_db_ca) == -1) {
+		warnx("TLS ca: %s", tls_config_error(cfg));
+		goto cfg_free;
+	}
+
+	if (d->d_db_crt != NULL &&
+	    tls_config_set_keypair_file(cfg,
+	    d->d_db_crt, d->d_db_key) == -1) {
+		lwarnx("TLS key pair: %s", tls_config_error(cfg));
+		goto cfg_free;
+	}
+
+#if 0
+	if (d->d_db_crl != NULL &&
+	    tls_config_set_crl_file(cfg, d->d_db_crl) == -1) {
+		lwarnx("TLS CRL: %s", tls_config_error(cfg));
+		goto cfg_free;
+	}
+#endif
+
+	ctx = tls_client();
+	if (ctx == NULL) {
+		lwarnx("unable to create new tls client");
+		goto cfg_free;
+	}
+
+	if (tls_configure(ctx, cfg) == -1) {
+		lwarnx("unable to configure tls client");
+		goto ctx_free;
+	}
+
+	if (tls_connect_socket(ctx, s, d->d_db_host) == -1) {
+		lwarnx("TLS connect: %s", tls_error(ctx));
+		goto ctx_free;
+	}
+
+	if (tls_handshake(ctx) == -1) {
+		lwarnx("TLS handshake: %s", tls_error(ctx));
+		goto ctx_close;
+	}
+
+	d->d_db_tls_ctx = ctx;
+	d->d_db_tls_cfg = cfg;
+	d->d_db_fd = s;
+	return (0);
+
+ctx_close:
+	tls_close(ctx);
+ctx_free:
+	tls_free(ctx);
+cfg_free:
+	tls_config_free(cfg);
+close:
+	close(s);
+	return (-1);
+}
+
+static ssize_t
+db_tls_read(struct flow_daemon *d, void *buf, size_t len)
+{
+	return (tls_read(d->d_db_tls_ctx, buf, len));
+}
+
+static ssize_t
+db_tls_write(struct flow_daemon *d, const void *buf, size_t len)
+{
+	return (tls_write(d->d_db_tls_ctx, buf, len));
+}
+
+static const char *
+db_tls_strerror(struct flow_daemon *d)
+{
+	return (tls_error(d->d_db_tls_ctx));
+}
+
+static void
+db_tls_close(struct flow_daemon *d)
+{
+	struct tls *ctx = d->d_db_tls_ctx;
+	int s = d->d_db_fd;
+	int on = 0;
+
+	if (ioctl(s, FIONBIO, &on) == -1)
+		lerr(1, "socket FIONBIO off");
+
+	tls_close(ctx);
+	tls_free(ctx);
+	tls_config_free(d->d_db_tls_cfg);
+
+	close(s);
+}
+
+static int
+db_connect(struct flow_daemon *d)
+{
+	int rv;
+	int on = 1;
+
+	rv = d->d_db_ops->connect(d);
+	if (rv == -1)
+		return (-1);
+
+	if (ioctl(d->d_db_fd, FIONBIO, &on) == -1)
+		lerr(1, "set db fd nonblocking");
+
+	return (0);
+}
+
+static int
+db_writebuf(struct flow_daemon *d, const struct buf *b)
+{
+	size_t off = 0;
+	int events;
+	ssize_t rv;
+
+	events = POLLIN|POLLOUT;
+	do {
+		struct pollfd pfd[1] = {
+			{ .fd = d->d_db_fd, .events = events },
+		};
+		int prv;
+
+		prv = poll(pfd, 1, 30000);
+		switch (prv) {
+		case -1:
+			lerr(1, "db write poll");
+			/* NOTREACHED */
+		case 0:
+			lwarnx("db write: timeout");
+			return (-1);
+		default:
+			assert(prv == 1);
+			break;
+		}
+
+		rv = d->d_db_ops->write(d, b->mem + off, b->off - off);
+		if (rv == -1) {
+			lwarnx("db write: %s", d->d_db_ops->strerror(d));
+			return (-1);
+		}
+		if (rv == 0) {
+			lwarnx("db write: disconnected");
+			return (-1);
+		}
+		if (rv == TLS_WANT_POLLIN) {
+			events = POLLIN;
+			continue;
+		}
+		if (rv == TLS_WANT_POLLOUT) {
+			events = POLLIN|POLLOUT;
+			continue;
+		}
+
+		events = POLLIN|POLLOUT;
+		off += rv;
+	} while (off < b->off);
+
+	return (0);
+}
+
+static ssize_t
+db_read(struct flow_daemon *d, void *buf, size_t len)
+{
+	int events;
+	ssize_t rv;
+
+	events = POLLIN;
+	for (;;) {
+		struct pollfd pfd[1] = {
+			{ .fd = d->d_db_fd, .events = events },
+		};
+		int prv;
+
+		prv = poll(pfd, 1, 30000);
+		switch (prv) {
+		case -1:
+			lerr(1, "read poll");
+			/* NOTREACHED */
+		case 0:
+			lwarnx("db read: timeout");
+			return (-1);
+		default:
+			assert(prv == 1);
+			break;
+		}
+
+		rv = d->d_db_ops->read(d, buf, sizeof(buf));
+		if (rv == -1) {
+			lwarnx("db read: %s", d->d_db_ops->strerror(d));
+			break;
+		}
+		if (rv == 0) {
+			lwarnx("db read: disconnected");
+			break;
+		}
+
+		switch (rv) {
+		case TLS_WANT_POLLIN:
+			events = POLLIN;
+			break;
+		case TLS_WANT_POLLOUT:
+			events = POLLIN|POLLOUT;
+			break;
+		default:
+			return (rv);
+		}
+	}
+
+	return (-1);
+}
+
+static void
+db_close(struct flow_daemon *d)
+{
+	d->d_db_ops->close(d);
+	d->d_db_fd = -1;
+}
+
+static int
+do_clickhouse_sql(struct flow_daemon *d, const struct buf *sqlbuf,
+    size_t rows, const char *what)
 {
 	static struct buf reqbuf;
-	int sock;
-	struct iovec iov[2];
-	FILE *ss;
-	char head[256];
+	uint8_t buf[1024];
+	ssize_t rv;
 
 	buf_init(&reqbuf);
 
-	sock = clickhouse_connect();
-	if (sock == -1) {
+	if (d->d_db_fd == -1 && db_connect(d) != 0) {
 		/* error was already logged */
-		return;
+		return (-1);
 	}
 
-	buf_printf(&reqbuf, "POST / HTTP/1.0\r\n");
-	buf_printf(&reqbuf, "Host: %s:%s\r\n",
-	    clickhouse_host, clickhouse_port);
-	if (clickhouse_database != NULL) {
+	buf_printf(&reqbuf, "POST / HTTP/1.1\r\n");
+	buf_printf(&reqbuf, "Host: %s\r\n", d->d_db_host);
+	if (d->d_db_name != NULL) {
 		buf_printf(&reqbuf, "X-ClickHouse-Database: %s\r\n",
-		    clickhouse_database);
+		    d->d_db_name);
 	}
-	buf_printf(&reqbuf, "X-ClickHouse-User: %s\r\n", clickhouse_user);
-	if (clickhouse_key != NULL)
-		buf_printf(&reqbuf, "X-ClickHouse-Key: %s\r\n", clickhouse_key);
+	buf_printf(&reqbuf, "X-ClickHouse-User: %s\r\n", d->d_db_user);
+	if (d->d_db_pass != NULL) {
+		buf_printf(&reqbuf, "X-ClickHouse-Key: %s\r\n",
+		    d->d_db_pass);
+	}
+	if (d->d_db_key != NULL) {
+		buf_printf(&reqbuf,
+		    "X-ClickHouse-SSL-Certificate-Auth: on\r\n");
+	}
 	buf_printf(&reqbuf, "Content-Length: %zu\r\n", sqlbuf->off);
 	buf_printf(&reqbuf, "Content-Type: text/sql\r\n");
 	buf_printf(&reqbuf, "\r\n");
 
-	iov[0].iov_base = reqbuf.mem;
-	iov[0].iov_len = reqbuf.off;
-	iov[1].iov_base = sqlbuf->mem;
-	iov[1].iov_len = sqlbuf->off;
-
-	writev(sock, iov, nitems(iov)); /* XXX */
-
-	ss = fdopen(sock, "r");
-	if (ss == NULL)
-		lerr(1, "fdopen");
-
-	fgets(head, sizeof (head), ss);
-	head[strlen(head) - 1] = '\0';
-	head[strlen(head) - 1] = '\0';
-	if (strcmp(head, "HTTP/1.0 200 OK") != 0)
-		lwarnx("clickhouse: error: returned %s", head);
-
-	if (debug) {
-		linfo("clickhouse: POST of %zu %s rows (%zu bytes): %s",
-		    rows, what, sqlbuf->off, head);
+	if (db_writebuf(d, &reqbuf) == -1) {
+		/* error already printed */
+		goto disconnect;
 	}
 
-	fclose(ss);
+	if (db_writebuf(d, sqlbuf) == -1) {
+		/* error already printed */
+		goto disconnect;
+	}
+
+	d->d_db_http_done = 0;
+	do {
+		llhttp_errno_t llherr;
+
+		rv = db_read(d, buf, sizeof(buf));
+		if (rv == -1) {
+			/* error already printed */
+			goto disconnect;
+		}
+
+		//write(1, buf, rv);
+		llherr = llhttp_execute(&d->d_db_llhttp, buf, rv);
+		if (llherr != HPE_OK) {
+			warnx("llhttp error %s: %s",
+			    llhttp_errno_name(llherr),
+			    d->d_db_llhttp.reason);
+			goto disconnect;
+		}
+	} while (!d->d_db_http_done);
+
+	if (debug) {
+		linfo("clickhouse: POST of %zu %s rows (%zu bytes): %u",
+		    rows, what, sqlbuf->off,
+		    llhttp_get_status_code(&d->d_db_llhttp));
+	}
+
+	llhttp_reset(&d->d_db_llhttp);
+
+	if (!d->d_db_http_keep_alive)
+		db_close(d);
+
+	return (0);
+
+disconnect:
+	llhttp_reset(&d->d_db_llhttp);
+	db_close(d);
+	return (-1);
+}
+
+static int
+http_r_on_message_complete(llhttp_t *llh)
+{
+	struct flow_daemon *d = llh->data;
+
+	d->d_db_http_done = 1;
+	d->d_db_http_keep_alive = llhttp_should_keep_alive(llh);
+
+	return (0);
 }
 
 static uint32_t
@@ -777,6 +1197,7 @@ static void
 timeslice_post_flows(struct timeslice *ts, struct buf *sqlbuf,
     const char *st, const char *et)
 {
+	static const char table[] = "xflows";
 	char ipbuf[NI_MAXHOST];
 	struct flow *f, *nf;
 	const struct flow_key *k;
@@ -787,7 +1208,7 @@ timeslice_post_flows(struct timeslice *ts, struct buf *sqlbuf,
 		return;
 
 	buf_init(sqlbuf);
-	buf_cat(sqlbuf, "INSERT INTO flows ("
+	buf_printf(sqlbuf, "INSERT INTO %s ("
 	    "host, begin_at, end_at, "
 	    "dir_in, dir_out, "
 	    "osaddr, odaddr, spi, "
@@ -795,7 +1216,7 @@ timeslice_post_flows(struct timeslice *ts, struct buf *sqlbuf,
 	    "packets, bytes, frags, "
 	    "syns, fins, rsts, rstacks, mintcpwin, maxtcpwin, "
 	    "minpktlen, maxpktlen, min_ttl, max_ttl, pkt_lens"
-	    ")\n" "FORMAT Values\n");
+	    ")\n" "FORMAT Values\n", table);
 
 	TAILQ_FOREACH_SAFE(f, &ts->ts_flow_list, f_entry_list, nf) {
 		const char *mjoin = "";
@@ -855,19 +1276,21 @@ timeslice_post_flows(struct timeslice *ts, struct buf *sqlbuf,
 	}
 	buf_printf(sqlbuf, ";\n");
 
-	do_clickhouse_sql(sqlbuf, rows, "flow");
+	do_clickhouse_sql(ts->ts_d, sqlbuf, rows, table);
 }
 
 static void
 timeslice_post_flowstats(struct timeslice *ts, struct buf *sqlbuf,
     const char *st, const char *et)
 {
+	static const char table[] = "xflowstats";
+
 	buf_init(sqlbuf);
-	buf_cat(sqlbuf, "INSERT INTO flowstats ("
+	buf_printf(sqlbuf, "INSERT INTO %s ("
 	    "host, begin_at, end_at, user_ms, kern_ms, "
 	    "reads, packets, bytes, flows, "
 	    "pcap_recv, pcap_drop, pcap_ifdrop, mdrop"
-	    ")\n" "FORMAT Values\n");
+	    ")\n" "FORMAT Values\n", table);
 	buf_printf(sqlbuf, "('%s',%s,%s,", ts->ts_hostname, st, et);
 	buf_printf(sqlbuf, "%u,%u,",
 	    tv_to_msec(&ts->ts_utime), tv_to_msec(&ts->ts_stime));
@@ -877,7 +1300,7 @@ timeslice_post_flowstats(struct timeslice *ts, struct buf *sqlbuf,
 	    ts->ts_pcap_ifdrop, ts->ts_mdrop);
 	buf_cat(sqlbuf, ");\n");
 
-	do_clickhouse_sql(sqlbuf, 1, "flowstats");
+	do_clickhouse_sql(ts->ts_d, sqlbuf, 1, table);
 }
 
 static void
@@ -899,7 +1322,7 @@ timeslice_post(void *arg)
 }
 
 struct timeslice *
-timeslice_alloc(const struct timeval *now)
+timeslice_alloc(struct flow_daemon *d, const struct timeval *now)
 {
 	struct timeslice *ts;
 
@@ -907,6 +1330,7 @@ timeslice_alloc(const struct timeval *now)
 	if (ts == NULL)
 		return (NULL);
 
+	ts->ts_d = d;
 	ts->ts_begin = *now;
 	ts->ts_flow_count = 0;
 	RBT_INIT(flow_tree, &ts->ts_flow_tree);
@@ -948,7 +1372,7 @@ flow_tick(int nope, short events, void *arg)
 
 	evtimer_add(&d->d_tick, &d->d_tv);
 
-	nts = timeslice_alloc(&now);
+	nts = timeslice_alloc(d, &now);
 	if (nts == NULL) {
 		/* just make this ts wider if we can't get a new one */
 		return;
