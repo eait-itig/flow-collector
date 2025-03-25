@@ -746,12 +746,34 @@ struct buf {
 	char	*mem;
 	size_t	 len;
 	size_t	 off;
+	size_t	 hdrlen;
 };
 
 static inline void
 buf_init(struct buf *b)
 {
 	b->off = 0;
+	b->hdrlen = 0;
+}
+
+static void
+buf_header(struct buf *b, size_t hdrlen)
+{
+	if (b->off != 0)
+		lerr(1, "buffer already used");
+
+	b->off = hdrlen;
+	b->hdrlen = hdrlen;
+}
+
+static void
+buf_put_header(struct buf *b, char *data, size_t len)
+{
+	if (b->hdrlen < len)
+		lerr(1, "not enough header space (%zu vs %zu)", b->hdrlen, len);
+
+	b->hdrlen -= len;
+	memcpy(b->mem + b->hdrlen, data, len);
 }
 
 static void
@@ -981,7 +1003,7 @@ db_connect(struct flow_daemon *d)
 static int
 db_writebuf(struct flow_daemon *d, const struct buf *b)
 {
-	size_t off = 0;
+	size_t off = b->hdrlen;
 	int events;
 	ssize_t rv;
 
@@ -1089,12 +1111,16 @@ db_close(struct flow_daemon *d)
 }
 
 static int
-do_clickhouse_sql(struct flow_daemon *d, const struct buf *sqlbuf,
-    size_t rows, const char *what)
+do_clickhouse_sql(struct flow_daemon *d, int (*header)(struct buf *, void *),
+    int (*row)(struct buf *, void *), void *data, const char *what)
 {
 	static struct buf reqbuf;
 	uint8_t buf[1024];
 	ssize_t rv;
+	size_t rows;
+	size_t chunks;
+	size_t bytes;
+	int done;
 
 	buf_init(&reqbuf);
 
@@ -1118,7 +1144,7 @@ do_clickhouse_sql(struct flow_daemon *d, const struct buf *sqlbuf,
 		buf_printf(&reqbuf,
 		    "X-ClickHouse-SSL-Certificate-Auth: on\r\n");
 	}
-	buf_printf(&reqbuf, "Content-Length: %zu\r\n", sqlbuf->off);
+	buf_printf(&reqbuf, "Transfer-Encoding: chunked\r\n");
 	buf_printf(&reqbuf, "Content-Type: text/sql\r\n");
 	buf_printf(&reqbuf, "\r\n");
 
@@ -1127,9 +1153,57 @@ do_clickhouse_sql(struct flow_daemon *d, const struct buf *sqlbuf,
 		goto disconnect;
 	}
 
-	if (db_writebuf(d, sqlbuf) == -1) {
-		/* error already printed */
-		goto disconnect;
+	rows = 0;
+	chunks = 0;
+	bytes = 0;
+	done = 0;
+	while (done == 0) {
+		int rc;
+
+		buf_init(&reqbuf);
+		buf_header(&reqbuf, 8);	/* 123456\r\n */
+
+		if (rows == 0) {
+			if ((*header)(&reqbuf, data) == -1) {
+				/* assume error already printed */
+				goto disconnect;
+			}
+		}
+
+		while (reqbuf.off < (64 * 1024)) {
+			rows++;
+			rc = (*row)(&reqbuf, data);
+			if (rc == -1) {
+				/* assume error already printed */
+				goto disconnect;
+			} else if (rc == 1) {
+				buf_printf(&reqbuf, ";\n");
+				done = 1;
+				break;
+			}
+		}
+
+		if (reqbuf.off != reqbuf.hdrlen) {
+			char chunk[128];
+			int len;
+
+			chunks++;
+			bytes += reqbuf.off - reqbuf.hdrlen;
+			len = snprintf(chunk, sizeof(chunk),
+			    "%zx" "\r\n", reqbuf.off - reqbuf.hdrlen);
+			buf_put_header(&reqbuf, chunk, len);
+
+			buf_printf(&reqbuf, "\r\n");
+
+			if (done) {
+				buf_cat(&reqbuf, "0" "\r\n" "\r\n");
+			}
+
+			if (db_writebuf(d, &reqbuf) == -1) {
+				/* error already printed */
+				goto disconnect;
+			}
+		}
 	}
 
 	d->d_db_http_done = 0;
@@ -1142,7 +1216,6 @@ do_clickhouse_sql(struct flow_daemon *d, const struct buf *sqlbuf,
 			goto disconnect;
 		}
 
-		//write(1, buf, rv);
 		llherr = llhttp_execute(&d->d_db_llhttp, buf, rv);
 		if (llherr != HPE_OK) {
 			warnx("llhttp error %s: %s",
@@ -1153,8 +1226,8 @@ do_clickhouse_sql(struct flow_daemon *d, const struct buf *sqlbuf,
 	} while (!d->d_db_http_done);
 
 	if (debug) {
-		linfo("clickhouse: POST of %zu %s rows (%zu bytes): %u",
-		    rows, what, sqlbuf->off,
+		linfo("clickhouse: POST of %zu %s rows (%zu bytes, %zu chunks),  %u",
+		    rows, what, bytes, chunks,
 		    llhttp_get_status_code(&d->d_db_llhttp));
 	}
 
@@ -1193,21 +1266,19 @@ tv_to_msec(const struct timeval *tv)
 	return (msecs);
 }
 
-static void
-timeslice_post_flows(struct timeslice *ts, struct buf *sqlbuf,
-    const char *st, const char *et)
+struct timeslice_insert_data {
+	struct timeslice *ts;
+	struct flow *flow;
+	const char *join;
+	const char *starttime;
+	const char *endtime;
+};
+
+static int
+timeslice_flows_header(struct buf *sqlbuf, void *xdata)
 {
 	static const char table[] = "xflows";
-	char ipbuf[NI_MAXHOST];
-	struct flow *f, *nf;
-	const struct flow_key *k;
-	size_t rows = 0;
-	const char *join = "";
 
-	if (TAILQ_EMPTY(&ts->ts_flow_list))
-		return;
-
-	buf_init(sqlbuf);
 	buf_printf(sqlbuf, "INSERT INTO %s ("
 	    "host, begin_at, end_at, "
 	    "dir_in, dir_out, "
@@ -1218,89 +1289,148 @@ timeslice_post_flows(struct timeslice *ts, struct buf *sqlbuf,
 	    "minpktlen, maxpktlen, min_ttl, max_ttl, pkt_lens"
 	    ")\n" "FORMAT Values\n", table);
 
-	TAILQ_FOREACH_SAFE(f, &ts->ts_flow_list, f_entry_list, nf) {
-		const char *mjoin = "";
-		unsigned int i;
+	return 0;
+}
 
-		k = &f->f_key;
-		buf_printf(sqlbuf, "%s('%s',%s,%s,", join,
-		    ts->ts_hostname, st, et);
-		buf_printf(sqlbuf, "%s,%s,",
-		    ISSET(k->k_dir, BPF_F_DIR_IN) ? "true" : "false",
-		    ISSET(k->k_dir, BPF_F_DIR_OUT) ? "true" : "false");
-		inet_ntop(PF_INET6, &k->k_osaddr6, ipbuf, sizeof(ipbuf));
+static int
+timeslice_flow_row(struct buf *sqlbuf, void *xdata)
+{
+	struct timeslice_insert_data *data = xdata;
+	struct flow *f;
+	struct flow_key *k;
+	char ipbuf[NI_MAXHOST];
+	unsigned int i;
+	const char *mjoin;
+
+	if (data->flow == NULL)
+		return 1;
+
+	f = data->flow;
+	k = &f->f_key;
+
+	buf_printf(sqlbuf, "%s('%s',%s,%s,", data->join,
+	    data->ts->ts_hostname, data->starttime, data->endtime);
+	buf_printf(sqlbuf, "%s,%s,",
+	    ISSET(k->k_dir, BPF_F_DIR_IN) ? "true" : "false",
+	    ISSET(k->k_dir, BPF_F_DIR_OUT) ? "true" : "false");
+	inet_ntop(PF_INET6, &k->k_osaddr6, ipbuf, sizeof(ipbuf));
+	buf_printf(sqlbuf, "toIPv6('%s'),", ipbuf);
+	inet_ntop(PF_INET6, &k->k_odaddr6, ipbuf, sizeof(ipbuf));
+	buf_printf(sqlbuf, "toIPv6('%s'),", ipbuf);
+	buf_printf(sqlbuf, "%u,", ntohl(k->k_ospi));
+	buf_printf(sqlbuf, "%d,%u,%u,", k->k_vlan, k->k_ipv,
+	    k->k_ipproto);
+	if (k->k_ipv == 4) {
+		inet_ntop(PF_INET, &k->k_saddr4, ipbuf, sizeof(ipbuf));
+		buf_printf(sqlbuf, "IPv4ToIPv6(toIPv4('%s')),", ipbuf);
+		inet_ntop(PF_INET, &k->k_daddr4, ipbuf, sizeof(ipbuf));
+		buf_printf(sqlbuf, "IPv4ToIPv6(toIPv4('%s')),", ipbuf);
+	} else if (k->k_ipv == 6) {
+		inet_ntop(PF_INET6, &k->k_saddr6, ipbuf, sizeof(ipbuf));
 		buf_printf(sqlbuf, "toIPv6('%s'),", ipbuf);
-		inet_ntop(PF_INET6, &k->k_odaddr6, ipbuf, sizeof(ipbuf));
+		inet_ntop(PF_INET6, &k->k_daddr6, ipbuf, sizeof(ipbuf));
 		buf_printf(sqlbuf, "toIPv6('%s'),", ipbuf);
-		buf_printf(sqlbuf, "%u,", ntohl(k->k_ospi));
-		buf_printf(sqlbuf, "%d,%u,%u,", k->k_vlan, k->k_ipv,
-		    k->k_ipproto);
-		if (k->k_ipv == 4) {
-			inet_ntop(PF_INET, &k->k_saddr4, ipbuf, sizeof(ipbuf));
-			buf_printf(sqlbuf, "IPv4ToIPv6(toIPv4('%s')),", ipbuf);
-			inet_ntop(PF_INET, &k->k_daddr4, ipbuf, sizeof(ipbuf));
-			buf_printf(sqlbuf, "IPv4ToIPv6(toIPv4('%s')),", ipbuf);
-		} else if (k->k_ipv == 6) {
-			inet_ntop(PF_INET6, &k->k_saddr6, ipbuf, sizeof(ipbuf));
-			buf_printf(sqlbuf, "toIPv6('%s'),", ipbuf);
-			inet_ntop(PF_INET6, &k->k_daddr6, ipbuf, sizeof(ipbuf));
-			buf_printf(sqlbuf, "toIPv6('%s'),", ipbuf);
-		} else {
-			buf_printf(sqlbuf, "toIPv6('::'),toIPv6('::'),");
-		}
-		buf_printf(sqlbuf,
-		    "%u,%u,%u,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
-		    "%u,%u,%u,%u,%u,%u,{",
-		    ntohs(k->k_sport), ntohs(k->k_dport), ntohl(k->k_gre_key),
-		    f->f_packets, f->f_bytes, f->f_frags,
-		    f->f_syns, f->f_fins, f->f_rsts, f->f_rstacks,
-		    f->f_min_tcpwin, f->f_max_tcpwin,
-		    f->f_min_pktlen, f->f_max_pktlen,
-		    f->f_min_ttl, f->f_max_ttl);
-		for (i = 0; i < nitems(f->f_pkt_lens); i++) {
-			uint64_t pkts = f->f_pkt_lens[i];
-			if (pkts == 0)
-				continue;
-
-			buf_printf(sqlbuf, "%s%u:%llu", mjoin,
-			    pkt_lens[i], pkts);
-
-			mjoin = ",";
-		}
-		buf_printf(sqlbuf, "})");
-
-		free(f);
-		join = ",\n";
-
-		++rows;
+	} else {
+		buf_printf(sqlbuf, "toIPv6('::'),toIPv6('::'),");
 	}
-	buf_printf(sqlbuf, ";\n");
+	buf_printf(sqlbuf,
+	    "%u,%u,%u,%llu,%llu,%llu,%llu,%llu,%llu,%llu,"
+	    "%u,%u,%u,%u,%u,%u,{",
+	    ntohs(k->k_sport), ntohs(k->k_dport), ntohl(k->k_gre_key),
+	    f->f_packets, f->f_bytes, f->f_frags,
+	    f->f_syns, f->f_fins, f->f_rsts, f->f_rstacks,
+	    f->f_min_tcpwin, f->f_max_tcpwin,
+	    f->f_min_pktlen, f->f_max_pktlen,
+	    f->f_min_ttl, f->f_max_ttl);
 
-	do_clickhouse_sql(ts->ts_d, sqlbuf, rows, table);
+	mjoin = "";
+	for (i = 0; i < nitems(f->f_pkt_lens); i++) {
+		uint64_t pkts = f->f_pkt_lens[i];
+		if (pkts == 0)
+			continue;
+
+		buf_printf(sqlbuf, "%s%u:%llu", mjoin,
+		    pkt_lens[i], pkts);
+
+		mjoin = ",";
+	}
+	buf_printf(sqlbuf, "})");
+
+	free(f);
+	data->flow = TAILQ_NEXT(data->flow, f_entry_list);
+	data->join = ",\n";
+	return 0;
 }
 
 static void
-timeslice_post_flowstats(struct timeslice *ts, struct buf *sqlbuf,
+timeslice_post_flows(struct timeslice *ts, struct buf *sqlbuf,
     const char *st, const char *et)
+{
+	struct timeslice_insert_data data;
+
+	data.ts = ts;
+	data.starttime = st;
+	data.endtime = et;
+	data.flow = TAILQ_FIRST(&ts->ts_flow_list);
+	data.join = "";
+
+	if (TAILQ_EMPTY(&ts->ts_flow_list))
+		return;
+
+	do_clickhouse_sql(ts->ts_d, timeslice_flows_header,
+	    timeslice_flow_row, &data, "flows");
+}
+
+static int
+timeslice_flowstats_header(struct buf *sqlbuf, void *data)
 {
 	static const char table[] = "xflowstats";
 
-	buf_init(sqlbuf);
 	buf_printf(sqlbuf, "INSERT INTO %s ("
 	    "host, begin_at, end_at, user_ms, kern_ms, "
 	    "reads, packets, bytes, flows, "
 	    "pcap_recv, pcap_drop, pcap_ifdrop, mdrop"
 	    ")\n" "FORMAT Values\n", table);
-	buf_printf(sqlbuf, "('%s',%s,%s,", ts->ts_hostname, st, et);
+
+	return 0;
+}
+
+static int
+timeslice_flowstats_row(struct buf *sqlbuf, void *xdata)
+{
+	struct timeslice_insert_data *data = xdata;
+	struct timeslice *ts = data->ts;
+
+	if (data->join != NULL) {
+		return 1;
+	}
+
+	buf_printf(sqlbuf, "('%s',%s,%s,", ts->ts_hostname, data->starttime, data->endtime);
 	buf_printf(sqlbuf, "%u,%u,",
 	    tv_to_msec(&ts->ts_utime), tv_to_msec(&ts->ts_stime));
 	buf_printf(sqlbuf, "%llu,%llu,%llu,%lu,", ts->ts_reads,
 	    ts->ts_packets, ts->ts_bytes, ts->ts_flow_count);
 	buf_printf(sqlbuf, "%u,%u,%u,%llu", ts->ts_pcap_recv, ts->ts_pcap_drop,
 	    ts->ts_pcap_ifdrop, ts->ts_mdrop);
-	buf_cat(sqlbuf, ");\n");
+	buf_cat(sqlbuf, ")");
 
-	do_clickhouse_sql(ts->ts_d, sqlbuf, 1, table);
+	data->join = "";
+	return 0;
+}
+
+static void
+timeslice_post_flowstats(struct timeslice *ts, struct buf *sqlbuf,
+    const char *st, const char *et)
+{
+	struct timeslice_insert_data data;
+
+	data.ts = ts;
+	data.starttime = st;
+	data.endtime = et;
+	data.join = NULL;
+
+	do_clickhouse_sql(ts->ts_d, timeslice_flowstats_header, timeslice_flowstats_row,
+	    &data, "xflowstats");
 }
 
 static void
